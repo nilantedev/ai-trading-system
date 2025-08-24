@@ -1,0 +1,25 @@
+# Minimal production dependencies for AI Trading System
+# Core web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+
+# Database and caching
+redis>=5.0.0
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.0
+
+# HTTP clients
+httpx>=0.25.0
+
+# Authentication and security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Logging and monitoring
+structlog>=23.2.0
+prometheus-client>=0.19.0
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.1.0

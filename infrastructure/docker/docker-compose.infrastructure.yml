@@ -1,0 +1,344 @@
+# Infrastructure Services - Docker Compose
+# Phase 1: Foundation infrastructure for AI trading system
+# Production-ready configuration with resource limits and security
+
+version: '3.8'
+
+# Networks for service isolation
+networks:
+  trading-frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  trading-backend:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+  trading-data:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.22.0.0/16
+
+# Volumes for persistent data
+volumes:
+  redis-data:
+    driver: local
+  questdb-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+services:
+  # Reverse Proxy and Load Balancer
+  traefik:
+    image: traefik:v3.0
+    container_name: trading-traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.api.address=:8080"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@main-nilante.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--metrics.prometheus=true"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "8080:80"      # HTTP
+      - "8443:443"     # HTTPS  
+      - "8081:8080"    # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/config:/etc/traefik
+      - ./traefik/letsencrypt:/letsencrypt
+    networks:
+      - trading-frontend
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '1'  
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+
+  # Redis - Hot data cache and session store
+  redis:
+    image: redis/redis-stack-server:7.2.0-v6
+    container_name: trading-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_ARGS=--maxmemory 8gb --maxmemory-policy allkeys-lru --save 900 1 --appendonly yes
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - trading-data
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 10G
+        reservations:
+          cpus: '2'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    sysctls:
+      - net.core.somaxconn=65535
+    labels:
+      - "traefik.enable=false"
+
+  # QuestDB - Time-series database for market data
+  questdb:
+    image: questdb/questdb:7.3.2
+    container_name: trading-questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"    # HTTP console
+      - "8812:8812"    # Postgres wire protocol
+      - "9009:9009"    # InfluxDB line protocol
+    environment:
+      - QDB_CAIRO_COMMIT_LAG=100ms
+      - QDB_CAIRO_MAX_UNCOMMITTED_ROWS=50000
+      - QDB_SHARED_WORKER_COUNT=4
+      - QDB_HTTP_WORKER_COUNT=2
+      - QDB_PG_USER=questdb
+      - QDB_PG_PASSWORD=${QUESTDB_PASSWORD:-trading123}
+    volumes:
+      - questdb-data:/root/.questdb
+      - ./questdb/config:/root/.questdb/conf:ro
+    networks:
+      - trading-data
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 16G
+        reservations:
+          cpus: '3'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.questdb.rule=Host(`questdb.localhost`)"
+      - "traefik.http.routers.questdb.entrypoints=websecure"
+      - "traefik.http.services.questdb.loadbalancer.server.port=9000"
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: trading-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=10GB'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    networks:
+      - trading-backend
+      - trading-data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.localhost`)"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+
+  # Grafana - Monitoring dashboards
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: trading-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_STRICT_TRANSPORT_SECURITY=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_INSTALL_PLUGINS=redis-datasource,questdb-questdb-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+
+  # Node Exporter - System metrics
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: trading-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    labels:
+      - "traefik.enable=false"
+
+  # cAdvisor - Container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: trading-cadvisor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    privileged: true
+    networks:
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    labels:
+      - "traefik.enable=false"
+
+  # Loki - Log aggregation
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: trading-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    networks:
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    labels:
+      - "traefik.enable=false"
+
+  # Promtail - Log collection
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: trading-promtail
+    restart: unless-stopped
+    volumes:
+      - ./promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    networks:
+      - trading-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    labels:
+      - "traefik.enable=false"

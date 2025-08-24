@@ -1,0 +1,208 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "AI Trading System - Performance Monitoring",
+    "tags": ["performance", "system", "monitoring"],
+    "style": "dark",
+    "timezone": "America/New_York",
+    "panels": [
+      {
+        "id": 1,
+        "title": "CPU Utilization",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "{{instance}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 70},
+                {"color": "red", "value": 90}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "Memory Usage",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 80},
+                {"color": "red", "value": 95}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Disk I/O",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(node_disk_read_bytes_total[5m])",
+            "legendFormat": "Read {{device}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(node_disk_written_bytes_total[5m])",
+            "legendFormat": "Write {{device}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Network Traffic",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(node_network_receive_bytes_total{device!=\"lo\"}[5m])",
+            "legendFormat": "Receive {{device}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(node_network_transmit_bytes_total{device!=\"lo\"}[5m])",
+            "legendFormat": "Transmit {{device}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Container Performance",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "container_memory_usage_bytes{container!=\"\"}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "Database Performance - Redis",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "redis_commands_processed_total",
+            "legendFormat": "Commands Processed",
+            "refId": "A"
+          },
+          {
+            "expr": "redis_connected_clients",
+            "legendFormat": "Connected Clients",
+            "refId": "B"
+          },
+          {
+            "expr": "redis_memory_used_bytes",
+            "legendFormat": "Memory Used",
+            "refId": "C"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 7,
+        "title": "Database Performance - QuestDB",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "questdb_http_requests_total",
+            "legendFormat": "HTTP Requests",
+            "refId": "A"
+          },
+          {
+            "expr": "questdb_memory_used_bytes",
+            "legendFormat": "Memory Usage",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      },
+      {
+        "id": 8,
+        "title": "Application Latency",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "trading_request_duration_seconds_bucket",
+            "legendFormat": "{{le}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32}
+      },
+      {
+        "id": 9,
+        "title": "Error Rates",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(trading_errors_total[5m])",
+            "legendFormat": "{{service}} - {{error_type}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.01},
+                {"color": "red", "value": 0.05}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "10s",
+    "schemaVersion": 30,
+    "version": 1
+  }
+}

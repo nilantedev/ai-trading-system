@@ -1,0 +1,294 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "AI Trading System - Company Overview",
+    "tags": ["trading", "overview", "business"],
+    "style": "dark",
+    "timezone": "America/New_York",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Portfolio Value",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_portfolio_total_value",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 10000},
+                {"color": "green", "value": 50000}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Daily P&L",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_daily_pnl",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": -1000},
+                {"color": "yellow", "value": 0},
+                {"color": "green", "value": 500}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Total Trades Today",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_trades_total_today",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Win Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_win_rate_percent",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 50},
+                {"color": "green", "value": 60}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "Portfolio Performance (30 Days)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "trading_portfolio_value_history",
+            "legendFormat": "Portfolio Value",
+            "refId": "A"
+          },
+          {
+            "expr": "trading_benchmark_sp500",
+            "legendFormat": "S&P 500 Benchmark",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Daily P&L History",
+        "type": "barchart",
+        "targets": [
+          {
+            "expr": "trading_daily_pnl_history",
+            "legendFormat": "Daily P&L",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": -500},
+                {"color": "yellow", "value": 0},
+                {"color": "green", "value": 500}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 7,
+        "title": "Active Positions",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "trading_active_positions",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "displayMode": "table"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 8,
+        "title": "Top Performing Strategies",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "trading_strategy_performance",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 9,
+        "title": "Risk Metrics",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_current_drawdown_percent",
+            "refId": "A"
+          },
+          {
+            "expr": "trading_var_95_percent",
+            "refId": "B"
+          },
+          {
+            "expr": "trading_sharpe_ratio",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "displayName": "Current Drawdown|VaR 95%|Sharpe Ratio"
+          }
+        },
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 20}
+      },
+      {
+        "id": 10,
+        "title": "Market Data Quality",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_market_data_latency_ms",
+            "refId": "A"
+          },
+          {
+            "expr": "trading_data_source_uptime_percent",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms|percent"
+          }
+        },
+        "gridPos": {"h": 4, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 11,
+        "title": "AI Model Performance",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "ai_model_accuracy_percent",
+            "legendFormat": "{{model_name}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 60},
+                {"color": "green", "value": 75}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 24}
+      },
+      {
+        "id": 12,
+        "title": "Recent Trade Executions",
+        "type": "logs",
+        "targets": [
+          {
+            "expr": "{job=\"trading-system\"} |= \"TRADE_EXECUTED\" or \"ORDER_FILLED\"",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28}
+      },
+      {
+        "id": 13,
+        "title": "Monthly Cost Analysis",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "trading_monthly_costs_by_service",
+            "legendFormat": "{{service}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36}
+      },
+      {
+        "id": 14,
+        "title": "System Health Overview",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "up{job=~\"trading.*\"}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36}
+      }
+    ],
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "refresh": "30s",
+    "schemaVersion": 30,
+    "version": 1
+  }
+}
