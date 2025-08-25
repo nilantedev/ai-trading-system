@@ -7,7 +7,7 @@ Provides REST APIs and WebSocket endpoints for trading system access.
 from fastapi import FastAPI, Request, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from fastapi.responses import JSONResponse
 import uvicorn
 import logging
@@ -27,8 +27,6 @@ from trading_common import get_settings, get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Security
-security = HTTPBearer()
 
 # Create FastAPI app
 app = FastAPI(
@@ -40,19 +38,21 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-# CORS middleware
+# CORS middleware - restrict origins in production
+allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=getattr(settings.api, "allowed_origins", ["*"]),
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
-# Trusted host middleware
+# Trusted host middleware - restrict hosts in production
+allowed_hosts = os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1,0.0.0.0").split(",")
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=settings.get("api", {}).get("allowed_hosts", ["*"])
+    allowed_hosts=allowed_hosts
 )
 
 
@@ -133,90 +133,11 @@ async def logging_middleware(request: Request, call_next):
     return response
 
 
-# Rate limiting middleware (simplified)
-request_counts = {}
-
-@app.middleware("http")
-async def rate_limiting_middleware(request: Request, call_next):
-    """Simple rate limiting middleware."""
-    client_ip = request.client.host if request.client else "unknown"
-    
-    # Skip rate limiting for health checks
-    if request.url.path in ["/health", "/api/v1/health"]:
-        return await call_next(request)
-    
-    current_time = time.time()
-    
-    # Clean old entries (older than 1 minute)
-    request_counts[client_ip] = [
-        req_time for req_time in request_counts.get(client_ip, [])
-        if current_time - req_time < 60
-    ]
-    
-    # Check rate limit (60 requests per minute per IP)
-    if len(request_counts.get(client_ip, [])) >= 60:
-        raise APIException(
-            status_code=429,
-            detail="Rate limit exceeded",
-            error_code="RATE_LIMIT_EXCEEDED",
-            context={"limit": 60, "window": "1 minute"}
-        )
-    
-    # Add current request
-    if client_ip not in request_counts:
-        request_counts[client_ip] = []
-    request_counts[client_ip].append(current_time)
-    
-    return await call_next(request)
+# Redis-based rate limiting will be added in startup event
 
 
-# Authentication dependency
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
-    """
-    Verify API token and return user information.
-    This is a simplified implementation - in production, integrate with proper auth service.
-    """
-    token = credentials.credentials
-    
-    # For demo purposes, accept any token that starts with "demo_"
-    if token.startswith("demo_"):
-        return {
-            "user_id": "demo_user",
-            "username": "demo",
-            "permissions": ["read", "write", "admin"],
-            "token": token
-        }
-    
-    # In production, verify JWT token here
-    if token == settings.get("api", {}).get("admin_token", "admin123"):
-        return {
-            "user_id": "admin",
-            "username": "admin",
-            "permissions": ["read", "write", "admin"],
-            "token": token
-        }
-    
-    raise APIException(
-        status_code=401,
-        detail="Invalid or expired token",
-        error_code="INVALID_TOKEN"
-    )
-
-
-# Optional auth dependency (for public endpoints)
-async def optional_auth(request: Request) -> Optional[Dict[str, Any]]:
-    """Optional authentication for public endpoints."""
-    try:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=auth_header[7:]
-            )
-            return await verify_token(credentials)
-    except Exception:
-        pass
-    return None
+# Import JWT authentication
+from api.auth import get_current_active_user, get_optional_user, User
 
 
 # Health check endpoint
@@ -337,6 +258,27 @@ async def startup_event():
     logger.info("AI Trading System API starting up...")
     
     try:
+        # Initialize Prometheus metrics
+        from api.metrics import create_metrics_middleware, get_metrics_handler
+        metrics_middleware = await create_metrics_middleware()
+        app.middleware("http")(metrics_middleware)
+        
+        # Add metrics endpoint
+        metrics_handler = get_metrics_handler()
+        app.get("/metrics")(metrics_handler)
+        logger.info("Prometheus metrics initialized")
+        
+        # Initialize rate limiting
+        from api.rate_limiter import create_rate_limit_middleware
+        rate_limiter_middleware = await create_rate_limit_middleware()
+        app.middleware("http")(rate_limiter_middleware)
+        logger.info("Redis-based rate limiting initialized")
+        
+        # Initialize WebSocket streaming
+        from api.websocket_manager import start_websocket_streaming
+        app.state.websocket_task = await start_websocket_streaming()
+        logger.info("WebSocket streaming initialized")
+        
         # Initialize core services
         logger.info("Initializing trading system services...")
         
@@ -357,6 +299,30 @@ async def shutdown_event():
     logger.info("AI Trading System API shutting down...")
     
     try:
+        # Stop WebSocket streaming
+        from api.websocket_manager import stop_websocket_streaming
+        try:
+            await stop_websocket_streaming()
+            # Cancel the WebSocket task if it exists
+            if hasattr(app.state, 'websocket_task') and app.state.websocket_task:
+                app.state.websocket_task.cancel()
+                try:
+                    await app.state.websocket_task
+                except asyncio.CancelledError:
+                    pass
+            logger.info("WebSocket streaming stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping WebSocket streaming: {e}")
+        
+        # Cleanup rate limiter
+        from api.rate_limiter import get_rate_limiter
+        try:
+            limiter = await get_rate_limiter()
+            await limiter.close()
+            logger.info("Rate limiter closed")
+        except Exception as e:
+            logger.warning(f"Error closing rate limiter: {e}")
+        
         # Cleanup services if needed
         logger.info("API shutdown complete")
         
@@ -365,8 +331,9 @@ async def shutdown_event():
 
 
 # Mount API routers
-from api.routers import market_data, trading, portfolio, system, websocket
+from api.routers import auth, market_data, trading, portfolio, system, websocket
 
+app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(market_data.router, prefix="/api/v1", tags=["Market Data"])
 app.include_router(trading.router, prefix="/api/v1", tags=["Trading"])
 app.include_router(portfolio.router, prefix="/api/v1", tags=["Portfolio"])

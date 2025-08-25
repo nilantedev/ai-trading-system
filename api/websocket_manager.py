@@ -23,6 +23,12 @@ from api.models import (
 from api.main import optional_auth, APIException
 from trading_common import get_logger
 
+# Import metrics (will be available after startup)
+try:
+    from api.metrics import metrics
+except ImportError:
+    metrics = None
+
 logger = get_logger(__name__)
 
 
@@ -103,6 +109,11 @@ class ConnectionManager:
             
             await self._send_message(websocket, welcome_msg)
             
+            # Record metrics
+            if metrics:
+                metrics.record_websocket_connection(stream_type, True)
+                metrics.update_websocket_connections(stream_type, len(self.connections[stream_type]))
+            
             logger.info(f"WebSocket connected: {stream_type} stream (total: {len(self.connections[stream_type])})")
             
         except Exception as e:
@@ -131,6 +142,13 @@ class ConnectionManager:
             # Clean up metadata
             self.connection_metadata.pop(websocket, None)
             self.subscriptions.pop(websocket, None)
+            
+            # Record metrics
+            if metrics:
+                metrics.record_websocket_connection(stream_type, False)
+                remaining_connections = sum(1 for conns in self.connections.values() 
+                                          for conn in conns if conn != websocket)
+                metrics.update_websocket_connections(stream_type, remaining_connections)
             
             logger.info(f"WebSocket disconnected: {stream_type} stream")
             
@@ -578,10 +596,13 @@ class WebSocketStreamer:
 # Global streamer
 websocket_streamer = WebSocketStreamer(connection_manager)
 
-# Start streaming when module is imported
+# WebSocket lifecycle management functions
 async def start_websocket_streaming():
-    """Start WebSocket streaming."""
-    asyncio.create_task(websocket_streamer.start_streaming())
+    """Start WebSocket streaming (called from FastAPI startup)."""
+    logger.info("Starting WebSocket streaming...")
+    return asyncio.create_task(websocket_streamer.start_streaming())
 
-# Initialize streaming
-asyncio.create_task(start_websocket_streaming())
+async def stop_websocket_streaming():
+    """Stop WebSocket streaming (called from FastAPI shutdown)."""
+    logger.info("Stopping WebSocket streaming...")
+    await websocket_streamer.stop_streaming()

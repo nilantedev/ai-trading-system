@@ -103,7 +103,7 @@ services:
       - "--entrypoints.api.address=:8082"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=admin@main-nilante.com"
+      - "--certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL:-admin@main-nilante.com}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       - "--metrics.prometheus=true"
       - "--log.level=INFO"
@@ -148,7 +148,7 @@ services:
     ports:
       - "127.0.0.1:6379:6379"  # Bind to localhost only for security
     environment:
-      - REDIS_ARGS=--maxmemory 16gb --maxmemory-policy allkeys-lru --save 900 1 --appendonly yes
+      - REDIS_ARGS=--maxmemory ${REDIS_MAX_MEMORY:-16gb} --maxmemory-policy ${REDIS_MAX_MEMORY_POLICY:-allkeys-lru} --save 900 1 --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD environment variable is required}
     volumes:
       - redis-data:/data
       - /srv/trading/config/redis.conf:/usr/local/etc/redis/redis.conf:ro
@@ -259,7 +259,7 @@ services:
     ports:
       - "127.0.0.1:3001:3000"  # Localhost only
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-TradingSystem2024!}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD environment variable is required}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SECURITY_COOKIE_SECURE=true
       - GF_SECURITY_STRICT_TRANSPORT_SECURITY=true
@@ -444,7 +444,10 @@ services:
       - "127.0.0.1:50051:50051"  # gRPC (localhost only)
     environment:
       - QUERY_DEFAULTS_LIMIT=25
-      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=${WEAVIATE_AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED:-false}
+      - AUTHENTICATION_APIKEY_ENABLED=${WEAVIATE_AUTHENTICATION_APIKEY_ENABLED:-true}
+      - AUTHENTICATION_APIKEY_ALLOWED_KEYS=${WEAVIATE_AUTHENTICATION_APIKEY_ALLOWED_KEYS:?WEAVIATE_AUTHENTICATION_APIKEY_ALLOWED_KEYS environment variable is required}
+      - AUTHENTICATION_APIKEY_USERS=${WEAVIATE_AUTHENTICATION_APIKEY_USERS:-admin}
       - PERSISTENCE_DATA_PATH=/var/lib/weaviate
       - DEFAULT_VECTORIZER_MODULE=none
       - ENABLE_MODULES=text2vec-openai,text2vec-cohere,text2vec-huggingface,ref2vec-centroid,generative-openai,qna-openai
@@ -483,8 +486,8 @@ services:
       - "127.0.0.1:9001:9000"    # API (localhost only)
       - "127.0.0.1:9002:9001"    # Console (localhost only)
     environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-TradingSystem2024!}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?MINIO_ROOT_USER environment variable is required}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD environment variable is required}
       - MINIO_BROWSER_REDIRECT_URL=https://trading.main-nilante.com/minio
     command: server /data --console-address ":9001"
     volumes:

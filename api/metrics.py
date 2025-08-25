@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""
+Prometheus Metrics for AI Trading System API
+Provides comprehensive monitoring and observability metrics.
+"""
+
+import time
+import logging
+from typing import Optional, Dict, Any
+from fastapi import Request, Response
+from prometheus_client import (
+    Counter, Histogram, Gauge, Info, 
+    CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST,
+    multiprocess, values
+)
+import os
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+# Create custom registry for multi-process support
+if os.environ.get('PROMETHEUS_MULTIPROC_DIR'):
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+else:
+    registry = None
+
+
+# HTTP Request Metrics
+http_requests_total = Counter(
+    'http_requests_total',
+    'Total number of HTTP requests',
+    ['method', 'endpoint', 'status_code'],
+    registry=registry
+)
+
+http_request_duration_seconds = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'endpoint'],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+    registry=registry
+)
+
+http_request_size_bytes = Histogram(
+    'http_request_size_bytes',
+    'HTTP request size in bytes',
+    ['method', 'endpoint'],
+    registry=registry
+)
+
+http_response_size_bytes = Histogram(
+    'http_response_size_bytes',
+    'HTTP response size in bytes',
+    ['method', 'endpoint'],
+    registry=registry
+)
+
+# Authentication Metrics
+auth_requests_total = Counter(
+    'auth_requests_total',
+    'Total number of authentication requests',
+    ['endpoint', 'status'],
+    registry=registry
+)
+
+auth_failures_total = Counter(
+    'auth_failures_total',
+    'Total number of authentication failures',
+    ['reason'],
+    registry=registry
+)
+
+active_sessions = Gauge(
+    'active_sessions_current',
+    'Current number of active user sessions',
+    registry=registry
+)
+
+# Rate Limiting Metrics
+rate_limit_requests_total = Counter(
+    'rate_limit_requests_total',
+    'Total number of requests checked by rate limiter',
+    ['limit_type', 'status'],
+    registry=registry
+)
+
+rate_limit_blocks_total = Counter(
+    'rate_limit_blocks_total',
+    'Total number of requests blocked by rate limiter',
+    ['limit_type', 'identifier_type'],
+    registry=registry
+)
+
+# WebSocket Metrics
+websocket_connections_total = Counter(
+    'websocket_connections_total',
+    'Total number of WebSocket connections',
+    ['stream_type', 'status'],
+    registry=registry
+)
+
+websocket_connections_current = Gauge(
+    'websocket_connections_current',
+    'Current number of active WebSocket connections',
+    ['stream_type'],
+    registry=registry
+)
+
+websocket_messages_total = Counter(
+    'websocket_messages_total',
+    'Total number of WebSocket messages sent',
+    ['stream_type', 'message_type'],
+    registry=registry
+)
+
+websocket_errors_total = Counter(
+    'websocket_errors_total',
+    'Total number of WebSocket errors',
+    ['stream_type', 'error_type'],
+    registry=registry
+)
+
+# Trading System Metrics
+market_data_points_total = Counter(
+    'market_data_points_total',
+    'Total number of market data points processed',
+    ['symbol', 'source'],
+    registry=registry
+)
+
+trading_signals_total = Counter(
+    'trading_signals_total',
+    'Total number of trading signals generated',
+    ['symbol', 'signal_type', 'strategy'],
+    registry=registry
+)
+
+orders_total = Counter(
+    'orders_total',
+    'Total number of orders',
+    ['symbol', 'order_type', 'status'],
+    registry=registry
+)
+
+portfolio_value_current = Gauge(
+    'portfolio_value_current',
+    'Current portfolio value',
+    registry=registry
+)
+
+# System Health Metrics
+system_info = Info(
+    'system_info',
+    'System information',
+    registry=registry
+)
+
+service_health_status = Gauge(
+    'service_health_status',
+    'Service health status (1=healthy, 0=unhealthy)',
+    ['service_name'],
+    registry=registry
+)
+
+database_connections_current = Gauge(
+    'database_connections_current',
+    'Current number of database connections',
+    ['database_type'],
+    registry=registry
+)
+
+external_api_requests_total = Counter(
+    'external_api_requests_total',
+    'Total number of external API requests',
+    ['provider', 'endpoint', 'status'],
+    registry=registry
+)
+
+external_api_duration_seconds = Histogram(
+    'external_api_duration_seconds',
+    'External API request duration in seconds',
+    ['provider', 'endpoint'],
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+    registry=registry
+)
+
+# Cache Metrics
+cache_operations_total = Counter(
+    'cache_operations_total',
+    'Total number of cache operations',
+    ['operation', 'status'],
+    registry=registry
+)
+
+cache_hit_ratio = Gauge(
+    'cache_hit_ratio',
+    'Cache hit ratio',
+    registry=registry
+)
+
+# Error Metrics
+errors_total = Counter(
+    'errors_total',
+    'Total number of errors',
+    ['error_type', 'severity'],
+    registry=registry
+)
+
+# Background Task Metrics
+background_tasks_total = Counter(
+    'background_tasks_total',
+    'Total number of background tasks executed',
+    ['task_type', 'status'],
+    registry=registry
+)
+
+background_task_duration_seconds = Histogram(
+    'background_task_duration_seconds',
+    'Background task duration in seconds',
+    ['task_type'],
+    registry=registry
+)
+
+
+class MetricsCollector:
+    """Metrics collection and management."""
+    
+    def __init__(self):
+        self.start_time = time.time()
+        self.request_start_times = {}
+        
+        # Initialize system info
+        system_info.info({
+            'version': '1.0.0',
+            'python_version': os.sys.version,
+            'started_at': str(int(self.start_time))
+        })
+    
+    async def record_http_request(self, request: Request, response: Response, duration: float):
+        """Record HTTP request metrics."""
+        method = request.method
+        endpoint = self._get_endpoint_label(request.url.path)
+        status_code = str(response.status_code)
+        
+        # Record basic metrics
+        http_requests_total.labels(
+            method=method,
+            endpoint=endpoint, 
+            status_code=status_code
+        ).inc()
+        
+        http_request_duration_seconds.labels(
+            method=method,
+            endpoint=endpoint
+        ).observe(duration)
+        
+        # Record request size if available
+        if hasattr(request, '_body'):
+            request_size = len(request._body) if request._body else 0
+            http_request_size_bytes.labels(
+                method=method,
+                endpoint=endpoint
+            ).observe(request_size)
+        
+        # Record response size
+        content_length = response.headers.get('content-length')
+        if content_length:
+            http_response_size_bytes.labels(
+                method=method,
+                endpoint=endpoint
+            ).observe(int(content_length))
+    
+    def record_auth_attempt(self, endpoint: str, success: bool, failure_reason: Optional[str] = None):
+        """Record authentication attempt."""
+        status = 'success' if success else 'failure'
+        auth_requests_total.labels(endpoint=endpoint, status=status).inc()
+        
+        if not success and failure_reason:
+            auth_failures_total.labels(reason=failure_reason).inc()
+    
+    def update_active_sessions(self, count: int):
+        """Update active sessions count."""
+        active_sessions.set(count)
+    
+    def record_rate_limit_check(self, limit_type: str, allowed: bool, identifier_type: str = 'ip'):
+        """Record rate limit check."""
+        status = 'allowed' if allowed else 'blocked'
+        rate_limit_requests_total.labels(limit_type=limit_type, status=status).inc()
+        
+        if not allowed:
+            rate_limit_blocks_total.labels(
+                limit_type=limit_type,
+                identifier_type=identifier_type
+            ).inc()
+    
+    def record_websocket_connection(self, stream_type: str, connected: bool):
+        """Record WebSocket connection event."""
+        status = 'connected' if connected else 'disconnected'
+        websocket_connections_total.labels(stream_type=stream_type, status=status).inc()
+    
+    def update_websocket_connections(self, stream_type: str, count: int):
+        """Update current WebSocket connections count."""
+        websocket_connections_current.labels(stream_type=stream_type).set(count)
+    
+    def record_websocket_message(self, stream_type: str, message_type: str):
+        """Record WebSocket message sent."""
+        websocket_messages_total.labels(
+            stream_type=stream_type,
+            message_type=message_type
+        ).inc()
+    
+    def record_websocket_error(self, stream_type: str, error_type: str):
+        """Record WebSocket error."""
+        websocket_errors_total.labels(
+            stream_type=stream_type,
+            error_type=error_type
+        ).inc()
+    
+    def record_market_data(self, symbol: str, source: str):
+        """Record market data point processed."""
+        market_data_points_total.labels(symbol=symbol, source=source).inc()
+    
+    def record_trading_signal(self, symbol: str, signal_type: str, strategy: str):
+        """Record trading signal generated."""
+        trading_signals_total.labels(
+            symbol=symbol,
+            signal_type=signal_type,
+            strategy=strategy
+        ).inc()
+    
+    def record_order(self, symbol: str, order_type: str, status: str):
+        """Record order event."""
+        orders_total.labels(
+            symbol=symbol,
+            order_type=order_type,
+            status=status
+        ).inc()
+    
+    def update_portfolio_value(self, value: float):
+        """Update current portfolio value."""
+        portfolio_value_current.set(value)
+    
+    def update_service_health(self, service_name: str, healthy: bool):
+        """Update service health status."""
+        service_health_status.labels(service_name=service_name).set(1 if healthy else 0)
+    
+    def update_database_connections(self, database_type: str, count: int):
+        """Update database connections count."""
+        database_connections_current.labels(database_type=database_type).set(count)
+    
+    def record_external_api_request(self, provider: str, endpoint: str, duration: float, success: bool):
+        """Record external API request."""
+        status = 'success' if success else 'error'
+        external_api_requests_total.labels(
+            provider=provider,
+            endpoint=endpoint,
+            status=status
+        ).inc()
+        
+        external_api_duration_seconds.labels(
+            provider=provider,
+            endpoint=endpoint
+        ).observe(duration)
+    
+    def record_cache_operation(self, operation: str, hit: bool):
+        """Record cache operation."""
+        status = 'hit' if hit else 'miss'
+        cache_operations_total.labels(operation=operation, status=status).inc()
+    
+    def update_cache_hit_ratio(self, ratio: float):
+        """Update cache hit ratio."""
+        cache_hit_ratio.set(ratio)
+    
+    def record_error(self, error_type: str, severity: str = 'error'):
+        """Record error occurrence."""
+        errors_total.labels(error_type=error_type, severity=severity).inc()
+    
+    def record_background_task(self, task_type: str, duration: float, success: bool):
+        """Record background task execution."""
+        status = 'success' if success else 'error'
+        background_tasks_total.labels(task_type=task_type, status=status).inc()
+        background_task_duration_seconds.labels(task_type=task_type).observe(duration)
+    
+    def _get_endpoint_label(self, path: str) -> str:
+        """Get normalized endpoint label for metrics."""
+        # Normalize path for metrics (remove dynamic parts)
+        if path.startswith('/api/v1/'):
+            parts = path.split('/')
+            if len(parts) > 3:
+                # Keep first 3 parts: ['', 'api', 'v1', endpoint]
+                endpoint = parts[3]
+                # Handle common dynamic parts
+                if len(parts) > 4 and parts[4].replace('-', '').replace('_', '').isalnum():
+                    return f"/api/v1/{endpoint}/:id"
+                return f"/api/v1/{endpoint}"
+        
+        # Handle WebSocket paths
+        if path.startswith('/ws'):
+            return '/ws'
+        
+        # Handle other special paths
+        if path in ['/', '/health', '/docs', '/redoc', '/openapi.json']:
+            return path
+        
+        return '/other'
+
+
+# Global metrics collector
+metrics = MetricsCollector()
+
+
+async def create_metrics_middleware():
+    """Create metrics middleware function."""
+    
+    async def metrics_middleware(request: Request, call_next):
+        """Prometheus metrics middleware."""
+        start_time = time.time()
+        
+        # Store start time for request
+        request_id = id(request)
+        metrics.request_start_times[request_id] = start_time
+        
+        # Process request
+        try:
+            response = await call_next(request)
+            duration = time.time() - start_time
+            
+            # Record metrics
+            await metrics.record_http_request(request, response, duration)
+            
+            return response
+            
+        except Exception as e:
+            # Record error
+            duration = time.time() - start_time
+            error_type = type(e).__name__
+            metrics.record_error(error_type, 'error')
+            
+            # Create error response for metrics
+            from fastapi.responses import JSONResponse
+            error_response = JSONResponse(
+                status_code=500,
+                content={"error": "Internal server error"}
+            )
+            
+            await metrics.record_http_request(request, error_response, duration)
+            
+            raise
+        finally:
+            # Cleanup
+            metrics.request_start_times.pop(request_id, None)
+    
+    return metrics_middleware
+
+
+def get_metrics_handler():
+    """Get Prometheus metrics handler."""
+    async def metrics_handler():
+        """Prometheus metrics endpoint."""
+        if registry:
+            content = generate_latest(registry)
+        else:
+            content = generate_latest()
+        
+        return Response(content, media_type=CONTENT_TYPE_LATEST)
+    
+    return metrics_handler
+
+
+# Export metrics instance for use in other modules
+__all__ = ['metrics', 'create_metrics_middleware', 'get_metrics_handler']
