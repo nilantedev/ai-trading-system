@@ -158,16 +158,8 @@ services:
       - "9000:9000"    # HTTP console
       - "8812:8812"    # Postgres wire protocol
       - "9009:9009"    # InfluxDB line protocol
-    environment:
-      - QDB_CAIRO_COMMIT_LAG=100
-      - QDB_CAIRO_MAX_UNCOMMITTED_ROWS=50000
-      - QDB_SHARED_WORKER_COUNT=4
-      - QDB_HTTP_WORKER_COUNT=2
-      - QDB_PG_USER=questdb
-      - QDB_PG_PASSWORD=${QUESTDB_PASSWORD:-trading123}
     volumes:
       - questdb-data:/root/.questdb
-      - ./questdb/config:/root/.questdb/conf:ro
     networks:
       - trading-data
     deploy:

@@ -165,6 +165,35 @@ class NewsEvent(BaseModel):
         validate_assignment = True
 
 
+class NewsItem(BaseModel):
+    """News article with sentiment analysis."""
+    title: str = Field(..., description="Article title")
+    content: str = Field(..., description="Article content")
+    source: str = Field(..., description="News source")
+    published_at: datetime = Field(..., description="Publication timestamp")
+    url: str = Field(..., description="Article URL")
+    sentiment_score: float = Field(..., description="Sentiment score (-1 to 1)")
+    relevance_score: float = Field(..., description="Relevance score (0 to 1)")
+    symbols: List[str] = Field(default_factory=list, description="Related symbols")
+    
+    class Config:
+        validate_assignment = True
+
+
+class SocialSentiment(BaseModel):
+    """Social media sentiment data."""
+    platform: str = Field(..., description="Social media platform")
+    content: str = Field(..., description="Post content")
+    author: str = Field(..., description="Author username")
+    timestamp: datetime = Field(..., description="Post timestamp")
+    sentiment_score: float = Field(..., description="Sentiment score (-1 to 1)")
+    engagement_score: float = Field(..., description="Engagement metrics")
+    symbols: List[str] = Field(default_factory=list, description="Mentioned symbols")
+    
+    class Config:
+        validate_assignment = True
+
+
 class TradingSignal(BaseModel):
     """AI-generated trading signal."""
     id: str = Field(..., description="Unique signal ID")
