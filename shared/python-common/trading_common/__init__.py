@@ -8,7 +8,7 @@ from .exceptions import TradingError, ValidationError, ConfigError
 from .models import *
 
 # Import database utilities
-from .database import get_database_manager, DatabaseManager, QuestDBOperations
+from .database import get_redis_client, RedisClient
 
 # Import cache utilities  
 from .cache import get_trading_cache, TradingCache
@@ -22,9 +22,8 @@ __all__ = [
     "TradingError",
     "ValidationError",
     "ConfigError",
-    "get_database_manager",
-    "DatabaseManager", 
-    "QuestDBOperations",
+    "get_redis_client",
+    "RedisClient",
     "get_trading_cache",
     "TradingCache"
 ]

@@ -10,7 +10,7 @@ import hashlib
 import redis.asyncio as redis
 from pydantic import BaseModel
 
-from .database import get_database_manager
+from .database import get_redis_client
 from .models import MarketData, TradingSignal, PortfolioSnapshot, Position
 from .logging import get_logger
 

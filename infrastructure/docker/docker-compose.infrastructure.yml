@@ -25,20 +25,20 @@ networks:
 
 # Volumes for persistent data with server deployment paths
 volumes:
-  # Hot data on fastest NVMe (/srv/ partition)
+  # Hot data - using local user directories for development
   redis-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /srv/trading/redis
+      device: /home/nilante/trading-data/redis
   
   questdb-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /srv/trading/questdb
+      device: /home/nilante/trading-data/questdb
       
   # Warm data on second NVMe (/mnt/fastdrive/)
   prometheus-data:
@@ -46,14 +46,14 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /mnt/fastdrive/trading/prometheus
+      device: /home/nilante/trading-data/prometheus
       
   grafana-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /mnt/fastdrive/trading/grafana
+      device: /home/nilante/trading-data/grafana
   
   # Pulsar data on warm storage
   pulsar-data:
@@ -61,7 +61,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /mnt/fastdrive/trading/pulsar
+      device: /home/nilante/trading-data/pulsar
 
 services:
   # Reverse Proxy and Load Balancer
@@ -76,7 +76,7 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.api.address=:8080"
+      - "--entrypoints.api.address=:8082"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
       - "--certificatesresolvers.letsencrypt.acme.email=admin@main-nilante.com"
@@ -87,6 +87,7 @@ services:
     ports:
       - "8080:80"      # HTTP
       - "8443:443"     # HTTPS  
+      - "8082:8082"    # API  
       - "8081:8080"    # Traefik dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -158,7 +159,7 @@ services:
       - "8812:8812"    # Postgres wire protocol
       - "9009:9009"    # InfluxDB line protocol
     environment:
-      - QDB_CAIRO_COMMIT_LAG=100ms
+      - QDB_CAIRO_COMMIT_LAG=100
       - QDB_CAIRO_MAX_UNCOMMITTED_ROWS=50000
       - QDB_SHARED_WORKER_COUNT=4
       - QDB_HTTP_WORKER_COUNT=2

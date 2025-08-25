@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional, List, Dict, Any, Union
 from enum import Enum
 
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, validator, model_validator
 import json
 
 
@@ -184,13 +184,13 @@ class TradingSignal(BaseModel):
     expires_at: Optional[datetime] = Field(None, description="Signal expiration time")
     status: OrderStatus = Field(default=OrderStatus.ACTIVE, description="Signal status")
 
-    @root_validator
-    def validate_prices(cls, values):
+    @model_validator(mode='after')
+    def validate_prices(self):
         """Validate price relationships."""
-        signal_type = values.get('signal_type')
-        target = values.get('target_price')
-        stop_loss = values.get('stop_loss')
-        take_profit = values.get('take_profit')
+        signal_type = self.signal_type
+        target = self.target_price
+        stop_loss = self.stop_loss
+        take_profit = self.take_profit
 
         if signal_type == SignalType.BUY:
             if stop_loss and target and stop_loss >= target:
@@ -203,7 +203,7 @@ class TradingSignal(BaseModel):
             if take_profit and target and take_profit >= target:
                 raise ValueError('For sell signals, take profit must be < target price')
 
-        return values
+        return self
 
     class Config:
         validate_assignment = True
