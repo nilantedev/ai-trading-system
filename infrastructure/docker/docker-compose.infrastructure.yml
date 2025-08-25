@@ -1,8 +1,7 @@
 # Infrastructure Services - Docker Compose
 # Phase 1: Foundation infrastructure for AI trading system
 # Production-ready configuration with resource limits and security
-
-version: '3.8'
+# Ubuntu 24.04 LTS compatible
 
 # Networks for service isolation
 networks:
@@ -24,16 +23,45 @@ networks:
       config:
         - subnet: 172.22.0.0/16
 
-# Volumes for persistent data
+# Volumes for persistent data with server deployment paths
 volumes:
+  # Hot data on fastest NVMe (/srv/ partition)
   redis-data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/trading/redis
+  
   questdb-data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/trading/questdb
+      
+  # Warm data on second NVMe (/mnt/fastdrive/)
   prometheus-data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/fastdrive/trading/prometheus
+      
   grafana-data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/fastdrive/trading/grafana
+  
+  # Pulsar data on warm storage
+  pulsar-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/fastdrive/trading/pulsar
 
 services:
   # Reverse Proxy and Load Balancer
@@ -275,7 +303,7 @@ services:
     container_name: trading-cadvisor
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8082:8080"  # Changed from 8080 to avoid conflict with Traefik
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -320,6 +348,44 @@ services:
           memory: 1G
     labels:
       - "traefik.enable=false"
+
+  # Apache Pulsar - Message streaming (critical component)
+  pulsar:
+    image: apachepulsar/pulsar:3.2.0
+    container_name: trading-pulsar
+    restart: unless-stopped
+    ports:
+      - "6650:6650"    # Pulsar binary protocol
+      - "8083:8080"    # Pulsar admin REST API (avoid conflict)
+    command: bin/pulsar standalone
+    environment:
+      - PULSAR_MEM="-Xms2g -Xmx8g -XX:MaxDirectMemorySize=4g"
+      - PULSAR_GC="-XX:+UseG1GC"
+    volumes:
+      - pulsar-data:/pulsar/data
+      - ./pulsar/conf:/pulsar/conf:ro
+    networks:
+      - trading-backend
+      - trading-data
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 12G
+        reservations:
+          cpus: '2'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "bin/pulsar-admin", "brokers", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pulsar.rule=Host(`pulsar.localhost`)"
+      - "traefik.http.routers.pulsar.entrypoints=websecure"
+      - "traefik.http.services.pulsar.loadbalancer.server.port=8080"
 
   # Promtail - Log collection
   promtail:

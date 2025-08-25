@@ -15,7 +15,7 @@ alembic>=1.13.0
 
 # HTTP and WebSocket clients
 httpx>=0.25.0
-websockets>=12.0
+websockets>=10.0,<11.0
 
 # Authentication and security
 python-jose[cryptography]>=3.3.0

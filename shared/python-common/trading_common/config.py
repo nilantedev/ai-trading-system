@@ -156,6 +156,7 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
         validate_assignment = True
+        extra = "ignore"  # Allow extra environment variables
 
 
 @lru_cache()
