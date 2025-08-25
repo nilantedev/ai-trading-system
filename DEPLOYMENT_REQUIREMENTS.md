@@ -1,7 +1,8 @@
 # 🚀 DEPLOYMENT REQUIREMENTS & CHECKLIST
 **Date**: August 25, 2025  
 **Target**: Ubuntu 24.04 Server (main-nilante.com)  
-**Status**: Ready for Production Deployment  
+**Status**: Phase 7 Complete - PhD-Level Intelligence Ready for Production  
+**Version**: 2.0.0-dev with Advanced ML Capabilities  
 
 ---
 
@@ -13,11 +14,16 @@
 ALPACA_API_KEY=your_alpaca_paper_trading_key_here
 ALPACA_SECRET_KEY=your_alpaca_paper_secret_here
 
-# OPTIONAL - Can be added post-deployment
+# PhD-LEVEL INTELLIGENCE - Highly recommended for full capabilities
 POLYGON_API_KEY=your_polygon_key_here
 NEWS_API_KEY=your_newsapi_key_here
+TWITTER_BEARER_TOKEN=your_twitter_v2_bearer_token_here
 REDDIT_CLIENT_ID=your_reddit_client_id_here
 REDDIT_CLIENT_SECRET=your_reddit_secret_here
+
+# OPTIONAL - Can be added post-deployment
+OPENAI_API_KEY=your_openai_key_here
+ANTHROPIC_API_KEY=your_anthropic_key_here
 ```
 
 **How to Get Alpaca Keys:**
@@ -30,7 +36,9 @@ REDDIT_CLIENT_SECRET=your_reddit_secret_here
 - SSH access to main-nilante.com
 - Sudo privileges for Docker installation
 - Ports 8000-8100 available for trading system
-- Minimum 200GB disk space for AI models (future)
+- **Minimum 500GB disk space** for PhD-level AI models and data
+- **16GB+ RAM recommended** for Graph Neural Networks
+- **GPU support optional** but recommended for accelerated training
 
 ---
 

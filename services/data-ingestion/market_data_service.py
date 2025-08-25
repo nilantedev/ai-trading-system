@@ -13,6 +13,7 @@ import os
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_pulsar_client
+from .smart_data_filter import filter_market_data, get_filtering_performance
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -94,16 +95,26 @@ class MarketDataService:
             quote = await self._get_alpha_vantage_quote(symbol)
         
         if quote:
-            # Cache the data
-            if self.cache:
-                await self.cache.set_market_data(quote)
+            # Apply smart filtering to only process high-value data
+            filtered_quote = await filter_market_data(quote)
             
-            # Publish to message stream
-            if self.producer:
-                try:
-                    await self._publish_market_data(quote)
-                except Exception as e:
-                    logger.warning(f"Failed to publish market data: {e}")
+            if filtered_quote:
+                # Cache the filtered data
+                if self.cache:
+                    await self.cache.set_market_data(filtered_quote)
+                
+                # Publish to message stream
+                if self.producer:
+                    try:
+                        await self._publish_market_data(filtered_quote)
+                    except Exception as e:
+                        logger.warning(f"Failed to publish market data: {e}")
+                
+                return filtered_quote
+            else:
+                # Data was filtered out - log for monitoring
+                logger.debug(f"Market data for {quote.symbol} filtered out as low-value")
+                return None
         
         return quote
     

@@ -23,10 +23,26 @@ from trading_strategies import (
 logger = get_logger(__name__)
 settings = get_settings()
 
+# Import Kelly position sizing
+try:
+    import sys
+    import os
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'portfolio-management'))
+    from kelly_position_sizer import calculate_optimal_position_size, PositionSizeRecommendation
+except ImportError:
+    logger.warning("Kelly position sizer not available - using fallback sizing")
+
+# Import alternative data collector
+try:
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'data-ingestion'))
+    from alternative_data_collector import get_alternative_data_collector, AlternativeDataSignal
+except ImportError:
+    logger.warning("Alternative data collector not available - using technical signals only")
+
 
 @dataclass
 class SignalConsensus:
-    """Consensus analysis of multiple trading signals."""
+    """Consensus analysis of multiple trading signals with Kelly sizing."""
     symbol: str
     timestamp: datetime
     signals: List[TradingSignal]
@@ -34,9 +50,15 @@ class SignalConsensus:
     consensus_confidence: float  # 0-1
     consensus_strength: float  # 0-1
     recommended_action: str  # 'BUY', 'SELL', 'HOLD', 'CLOSE'
-    position_size: float  # 0-1 (fraction of portfolio)
+    position_size: float  # Dollar amount (Kelly-optimized)
+    position_percent: float  # Percentage of portfolio
     risk_level: str  # 'LOW', 'MEDIUM', 'HIGH'
     strategy_breakdown: Dict[str, int]  # Count of signals per strategy
+    kelly_fraction: Optional[float] = None  # Kelly fraction used
+    kelly_confidence: str = "UNKNOWN"  # Kelly confidence level
+    sizing_reasoning: str = ""  # Position sizing explanation
+    alternative_data_signals: List = None  # Alternative data signals
+    alternative_data_score: float = 0.0  # 0-1, overall alternative data sentiment
 
 
 class SignalGenerationService:
@@ -46,6 +68,7 @@ class SignalGenerationService:
         self.consumer = None
         self.producer = None
         self.cache = None
+        self.alternative_data_collector = None
         
         # Initialize trading strategies
         self.strategies = {
@@ -77,6 +100,13 @@ class SignalGenerationService:
             self.consumer = await get_message_consumer()
             self.producer = await get_message_producer()
             self.cache = get_trading_cache()
+            
+            # Initialize alternative data collector
+            try:
+                self.alternative_data_collector = await get_alternative_data_collector()
+                logger.info("Alternative data collector initialized")
+            except Exception as e:
+                logger.warning(f"Alternative data collector not available: {e}")
             
             # Subscribe to indicator analysis
             await self._setup_subscriptions()
@@ -198,6 +228,27 @@ class SignalGenerationService:
     async def _analyze_signal_consensus(self, symbol: str, signals: List[TradingSignal]) -> SignalConsensus:
         """Analyze multiple signals to reach consensus."""
         
+        # Get alternative data signals
+        alternative_signals = []
+        alternative_data_score = 0.0
+        
+        if self.alternative_data_collector:
+            try:
+                alt_data = await self.alternative_data_collector.get_comprehensive_alternative_data(symbol)
+                if alt_data and alt_data.signals:
+                    alternative_signals = alt_data.signals
+                    # Calculate overall alternative data sentiment score
+                    bullish_count = sum(1 for s in alt_data.signals if s.signal_type == 'BUY')
+                    bearish_count = sum(1 for s in alt_data.signals if s.signal_type == 'SELL')
+                    total_signals = len(alt_data.signals)
+                    
+                    if total_signals > 0:
+                        alternative_data_score = (bullish_count - bearish_count) / total_signals
+                        alternative_data_score = (alternative_data_score + 1) / 2  # Normalize to 0-1
+                        logger.debug(f"Alternative data score for {symbol}: {alternative_data_score:.2f} ({bullish_count} bullish, {bearish_count} bearish)")
+            except Exception as e:
+                logger.warning(f"Failed to get alternative data for {symbol}: {e}")
+        
         # Count signals by type
         buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
         sell_signals = [s for s in signals if s.signal_type == SignalType.SELL]
@@ -215,25 +266,65 @@ class SignalGenerationService:
         position_size = 0.0
         risk_level = "LOW"
         
-        # Weighted consensus based on signal confidence and strength
+        # Weighted consensus based on signal confidence, strength, and alternative data
         if buy_signals and sell_signals:
-            # Conflicting signals - analyze strength
+            # Conflicting signals - analyze strength with alternative data boost
             buy_weight = sum(s.confidence * s.strength for s in buy_signals)
             sell_weight = sum(s.confidence * s.strength for s in sell_signals)
+            
+            # Apply alternative data influence (20% weight)
+            if alternative_data_score > 0.6:  # Bullish alternative data
+                buy_weight *= (1 + 0.2 * (alternative_data_score - 0.5))
+            elif alternative_data_score < 0.4:  # Bearish alternative data
+                sell_weight *= (1 + 0.2 * (0.5 - alternative_data_score))
             
             if buy_weight > sell_weight * 1.5:  # Require 50% stronger signal
                 consensus_signal = SignalType.BUY
                 consensus_confidence = min(buy_weight / len(buy_signals), 1.0)
                 consensus_strength = sum(s.strength for s in buy_signals) / len(buy_signals)
                 recommended_action = "BUY"
-                position_size = min(consensus_confidence * 0.2, 0.1)  # Max 10% position
+                
+                # Calculate Kelly-optimized position size
+                try:
+                    kelly_rec = await calculate_optimal_position_size(
+                        symbol=symbol,
+                        signal_confidence=consensus_confidence,
+                        signal_strength=consensus_strength,
+                        portfolio_value=100000,  # Default portfolio value - should come from portfolio service
+                        current_price=1.0,  # Would get from market data
+                        win_rate=0.55,  # Conservative estimate - should come from strategy performance
+                        avg_win=0.02,  # 2% average win
+                        avg_loss=-0.01  # 1% average loss
+                    )
+                    position_size = kelly_rec.position_dollars / 100000  # Convert to percentage
+                except Exception as e:
+                    logger.warning(f"Kelly sizing failed for {symbol}, using fallback: {e}")
+                    position_size = min(consensus_confidence * 0.2, 0.1)  # Max 10% position fallback
+                
                 risk_level = "MEDIUM" if consensus_confidence > 0.7 else "HIGH"
             elif sell_weight > buy_weight * 1.5:
                 consensus_signal = SignalType.SELL
                 consensus_confidence = min(sell_weight / len(sell_signals), 1.0)
                 consensus_strength = sum(s.strength for s in sell_signals) / len(sell_signals)
                 recommended_action = "SELL"
-                position_size = min(consensus_confidence * 0.2, 0.1)
+                
+                # Calculate Kelly-optimized position size
+                try:
+                    kelly_rec = await calculate_optimal_position_size(
+                        symbol=symbol,
+                        signal_confidence=consensus_confidence,
+                        signal_strength=consensus_strength,
+                        portfolio_value=100000,
+                        current_price=1.0,
+                        win_rate=0.55,
+                        avg_win=0.02,
+                        avg_loss=-0.01
+                    )
+                    position_size = kelly_rec.position_dollars / 100000
+                except Exception as e:
+                    logger.warning(f"Kelly sizing failed for {symbol}, using fallback: {e}")
+                    position_size = min(consensus_confidence * 0.2, 0.1)
+                
                 risk_level = "MEDIUM" if consensus_confidence > 0.7 else "HIGH"
             else:
                 # Too conflicted - hold
@@ -241,23 +332,71 @@ class SignalGenerationService:
                 risk_level = "HIGH"
         
         elif buy_signals and not sell_signals:
-            # Clear buy consensus
+            # Clear buy consensus - boost with alternative data
             if len(buy_signals) >= 2:  # Require at least 2 confirming strategies
                 consensus_signal = SignalType.BUY
                 consensus_confidence = sum(s.confidence for s in buy_signals) / len(buy_signals)
                 consensus_strength = sum(s.strength for s in buy_signals) / len(buy_signals)
+                
+                # Boost confidence if alternative data agrees
+                if alternative_data_score > 0.6:
+                    consensus_confidence = min(consensus_confidence * 1.1, 1.0)  # 10% boost
+                elif alternative_data_score < 0.4:  # Alternative data disagrees
+                    consensus_confidence *= 0.9  # 10% reduction
+                
                 recommended_action = "BUY"
-                position_size = min(consensus_confidence * len(buy_signals) * 0.05, 0.15)  # Max 15%
+                
+                # Calculate Kelly-optimized position size
+                try:
+                    kelly_rec = await calculate_optimal_position_size(
+                        symbol=symbol,
+                        signal_confidence=consensus_confidence,
+                        signal_strength=consensus_strength,
+                        portfolio_value=100000,
+                        current_price=1.0,
+                        win_rate=0.60,  # Higher win rate for clear consensus
+                        avg_win=0.025,  # Slightly higher expected win
+                        avg_loss=-0.01
+                    )
+                    position_size = kelly_rec.position_dollars / 100000
+                except Exception as e:
+                    logger.warning(f"Kelly sizing failed for {symbol}, using fallback: {e}")
+                    position_size = min(consensus_confidence * len(buy_signals) * 0.05, 0.15)
+                
                 risk_level = "LOW" if len(buy_signals) >= 3 and consensus_confidence > 0.8 else "MEDIUM"
         
         elif sell_signals and not buy_signals:
-            # Clear sell consensus
+            # Clear sell consensus - boost with alternative data
             if len(sell_signals) >= 2:
                 consensus_signal = SignalType.SELL
                 consensus_confidence = sum(s.confidence for s in sell_signals) / len(sell_signals)
                 consensus_strength = sum(s.strength for s in sell_signals) / len(sell_signals)
+                
+                # Boost confidence if alternative data agrees
+                if alternative_data_score < 0.4:
+                    consensus_confidence = min(consensus_confidence * 1.1, 1.0)  # 10% boost
+                elif alternative_data_score > 0.6:  # Alternative data disagrees
+                    consensus_confidence *= 0.9  # 10% reduction
+                
                 recommended_action = "SELL"
-                position_size = min(consensus_confidence * len(sell_signals) * 0.05, 0.15)
+                
+                # Calculate Kelly-optimized position size
+                try:
+                    kelly_rec = await calculate_optimal_position_size(
+                        symbol=symbol,
+                        signal_confidence=consensus_confidence,
+                        signal_strength=consensus_strength,
+                        portfolio_value=100000,
+                        current_price=1.0,
+                        win_rate=0.60,  # Higher win rate for clear consensus
+                        avg_win=0.025,
+                        avg_loss=-0.01
+                    )
+                    position_size = kelly_rec.position_dollars / 100000
+                except Exception as e:
+                    logger.warning(f"Kelly sizing failed for {symbol}, using fallback: {e}")
+                    position_size = min(consensus_confidence * len(sell_signals) * 0.05, 0.15)
+                
                 risk_level = "LOW" if len(sell_signals) >= 3 and consensus_confidence > 0.8 else "MEDIUM"
         
         return SignalConsensus(
@@ -270,7 +409,9 @@ class SignalGenerationService:
             recommended_action=recommended_action,
             position_size=position_size,
             risk_level=risk_level,
-            strategy_breakdown=strategy_breakdown
+            strategy_breakdown=strategy_breakdown,
+            alternative_data_signals=alternative_signals,
+            alternative_data_score=alternative_data_score
         )
     
     async def _cache_signal_consensus(self, consensus: SignalConsensus):
