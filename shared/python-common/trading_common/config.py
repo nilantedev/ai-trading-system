@@ -176,11 +176,25 @@ class SecuritySettings(BaseSettings):
     rate_limit_requests: int = Field(default=100)
     rate_limit_window: int = Field(default=60)
     
+    # Additional rate limiting (used by rate limiter code)
+    rate_limit_requests_per_minute: int = Field(default=100)
+    rate_limit_burst: int = Field(default=10)
+    
+    # Trusted hosts
+    trusted_hosts: List[str] = Field(default=["localhost", "127.0.0.1"])
+    
     @field_validator('cors_origins', mode='before')
     @classmethod
     def parse_cors_origins(cls, v):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(',')]
+        return v
+    
+    @field_validator('trusted_hosts', mode='before')
+    @classmethod
+    def parse_trusted_hosts(cls, v):
+        if isinstance(v, str):
+            return [host.strip() for host in v.split(',')]
         return v
     
     class Config:
@@ -224,6 +238,56 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         """Check if running in development environment."""
         return self.environment.lower() == "development"
+    
+    def validate_production_config(self) -> List[str]:
+        """Validate production configuration and return list of issues."""
+        issues = []
+        
+        if not self.is_production:
+            return issues
+            
+        # Check critical secrets
+        if self.security.secret_key == "dev-secret-change-in-production":
+            issues.append("CRITICAL: Using default secret key in production! Set SECURITY_SECRET_KEY")
+            
+        if len(self.security.secret_key) < 32:
+            issues.append("CRITICAL: Secret key too short for production (minimum 32 characters)")
+            
+        # Check trading API keys
+        if not self.trading.alpaca_api_key:
+            issues.append("WARNING: No Alpaca API key configured - trading features disabled")
+            
+        if not self.trading.alpaca_secret_key:
+            issues.append("WARNING: No Alpaca secret key configured - trading features disabled")
+            
+        # Check if still using paper trading in production
+        if self.trading.paper_trading:
+            issues.append("WARNING: Paper trading enabled in production - consider live trading")
+            
+        # Check admin password
+        admin_password = os.getenv("ADMIN_PASSWORD")
+        admin_password_hash = os.getenv("ADMIN_PASSWORD_HASH")
+        if admin_password == "TradingSystem2024!" and not admin_password_hash:
+            issues.append("CRITICAL: Using default admin password in production! Set ADMIN_PASSWORD_HASH")
+            
+        return issues
+    
+    def enforce_production_security(self):
+        """Enforce production security requirements - raises exception if critical issues found."""
+        issues = self.validate_production_config()
+        critical_issues = [issue for issue in issues if issue.startswith("CRITICAL")]
+        
+        if critical_issues:
+            error_msg = "Production security validation failed:\n" + "\n".join(critical_issues)
+            raise ValueError(error_msg)
+            
+        # Log warnings
+        warnings = [issue for issue in issues if issue.startswith("WARNING")]
+        if warnings:
+            import logging
+            logger = logging.getLogger(__name__)
+            for warning in warnings:
+                logger.warning(warning)
     
     class Config:
         env_file = ".env"

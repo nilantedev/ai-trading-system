@@ -27,6 +27,15 @@ from trading_common import get_settings, get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
+# Validate production configuration on startup
+try:
+    settings.enforce_production_security()
+    logger.info("Configuration validation passed")
+except ValueError as e:
+    logger.error(f"Configuration validation failed: {e}")
+    if settings.is_production:
+        raise
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -38,22 +47,45 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-# CORS middleware - restrict origins in production
-allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+# CORS middleware - use unified settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=settings.security.cors_origins,
+    allow_credentials=settings.security.cors_allow_credentials,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
-# Trusted host middleware - restrict hosts in production
-allowed_hosts = os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1,0.0.0.0").split(",")
+# Trusted host middleware
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=allowed_hosts
+    allowed_hosts=settings.security.trusted_hosts,
 )
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    
+    # HSTS for production
+    if settings.is_production:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    
+    # Content Security Policy
+    csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'"
+    response.headers["Content-Security-Policy"] = csp
+    
+    return response
+
+# Rate limiting middleware (TODO: implement Redis-based rate limiting)
 
 
 class APIException(HTTPException):
@@ -138,6 +170,13 @@ async def logging_middleware(request: Request, call_next):
 
 # Import JWT authentication
 from api.auth import get_current_active_user, get_optional_user, User
+
+# Create compatibility aliases for legacy router imports
+verify_token = get_current_active_user
+optional_auth = get_optional_user
+
+# Create APIException alias for routers
+APIException = HTTPException
 
 
 # Health check endpoint

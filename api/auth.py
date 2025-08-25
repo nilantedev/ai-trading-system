@@ -6,6 +6,7 @@ Provides secure JWT token generation, validation, and user management.
 
 import os
 import secrets
+import sys
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import HTTPException, Depends, status
@@ -13,18 +14,35 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from enum import Enum
 import logging
 
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from trading_common import get_settings
+
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # Security configuration
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# JWT configuration
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
+# JWT configuration - use unified settings
+JWT_SECRET_KEY = settings.security.secret_key
+JWT_ALGORITHM = settings.security.jwt_algorithm
+JWT_EXPIRY_MINUTES = settings.security.jwt_expire_minutes
+
+# Legacy environment variable support with deprecation warning
+if os.getenv("JWT_SECRET_KEY") and os.getenv("JWT_SECRET_KEY") != settings.security.secret_key:
+    logger.warning("Legacy JWT_SECRET_KEY detected. Please use SECURITY_SECRET_KEY instead.")
+    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+# Production validation
+if settings.environment == "production" and JWT_SECRET_KEY == "dev-secret-change-in-production":
+    logger.error("CRITICAL: Default secret key detected in production! Set SECURITY_SECRET_KEY immediately.")
+    raise ValueError("Production deployment requires secure secret key")
 
 # Admin configuration
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
@@ -38,7 +56,7 @@ if not ADMIN_PASSWORD_HASH:
     logger.warning("Using default admin password - CHANGE THIS IN PRODUCTION!")
 
 
-class UserRole(str):
+class UserRole(str, Enum):
     """User roles for permission management."""
     ADMIN = "admin"
     TRADER = "trader"
@@ -123,7 +141,7 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(hours=JWT_EXPIRY_HOURS)
+        expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRY_MINUTES)
     
     token_data = TokenData(
         user_id=user.user_id,
@@ -206,6 +224,24 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
             detail="Inactive user"
         )
     return current_user
+
+
+async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[User]:
+    """Get optional user from JWT token - returns None if no token or invalid."""
+    if not credentials:
+        return None
+    
+    try:
+        token_data = verify_access_token(credentials.credentials)
+        
+        # Get user from system users
+        user_data = SYSTEM_USERS.get(token_data.username)
+        if not user_data or not user_data["is_active"]:
+            return None
+        
+        return User(**{k: v for k, v in user_data.items() if k != "password_hash"})
+    except (JWTError, HTTPException, ValueError):
+        return None
 
 
 def require_permission(permission: str):

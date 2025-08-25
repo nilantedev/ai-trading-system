@@ -6,6 +6,15 @@
 
 ---
 
+## 🔐 **CRITICAL SECURITY NOTICE**
+
+**⚠️ PRODUCTION SECURITY REQUIREMENTS:**
+1. **NEVER use default secrets in production** - System will fail to start
+2. **Generate secure JWT secret**: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+3. **Hash admin password**: `python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('your_password'))"`
+4. **Use prefixed environment variables** (SECURITY_*, DB_*, TRADING_*, etc.)
+5. **System validates all critical secrets on startup**
+
 ## 📋 **PRE-DEPLOYMENT REQUIREMENTS**
 
 ### **1. API Keys Required (User Action)**

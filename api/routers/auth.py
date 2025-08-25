@@ -17,7 +17,7 @@ from ..auth import (
     get_current_active_user,
     get_auth_health,
     User,
-    JWT_EXPIRY_HOURS
+    JWT_EXPIRY_MINUTES
 )
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         )
     
     # Create access token
-    access_token_expires = timedelta(hours=JWT_EXPIRY_HOURS)
+    access_token_expires = timedelta(minutes=JWT_EXPIRY_MINUTES)
     access_token = create_access_token(user, expires_delta=access_token_expires)
     
     expires_at = datetime.utcnow() + access_token_expires
@@ -112,7 +112,7 @@ async def login_json(login_data: LoginRequest):
         )
     
     # Create access token  
-    access_token_expires = timedelta(hours=JWT_EXPIRY_HOURS)
+    access_token_expires = timedelta(minutes=JWT_EXPIRY_MINUTES)
     access_token = create_access_token(user, expires_delta=access_token_expires)
     
     expires_at = datetime.utcnow() + access_token_expires

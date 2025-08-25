@@ -257,6 +257,59 @@ ai-trading-system/
 
 ---
 
+## 🔐 Configuration & Security
+
+### Environment Configuration
+The system uses **prefixed environment variables** for all configuration:
+
+- **SECURITY_*** - Security settings (JWT, CORS, rate limiting)
+- **DB_*** - Database connections (Redis, QuestDB, PostgreSQL)
+- **TRADING_*** - Trading API keys and parameters
+- **AI_*** - AI/ML model settings
+- **MSG_*** - Message broker configuration
+- **MONITORING_*** - Observability settings
+
+**Configuration Setup:**
+```bash
+# Copy the example configuration
+cp .env.example .env
+
+# Generate secure JWT secret for production
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Update .env with your values
+nano .env
+```
+
+### Security Features
+- **🔒 JWT Authentication** - Unified secret management with production validation
+- **🛡️ Security Headers** - Comprehensive protection against web vulnerabilities
+- **⚡ Rate Limiting** - Configurable request throttling
+- **✅ Production Validation** - Automatic security checks on startup
+- **🔑 Secure Defaults** - Fails fast with insecure configuration
+
+### Production Security Requirements
+The system enforces critical security requirements in production:
+- Minimum 32-character JWT secret key
+- No default passwords allowed
+- Required API keys for trading functionality
+- Automatic HSTS and CSP headers
+- Trusted host validation
+
+**Production Deployment:**
+```bash
+# Set production environment
+export ENVIRONMENT=production
+
+# System will validate:
+# - SECURITY_SECRET_KEY is not default
+# - ADMIN_PASSWORD_HASH is set
+# - Trading API keys are configured
+# - All critical secrets meet requirements
+```
+
+---
+
 ## 🧪 Testing Strategy
 
 ### Testing Pyramid
