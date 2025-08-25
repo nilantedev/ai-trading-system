@@ -9,18 +9,24 @@
 ```bash
 # Create required storage directories
 sudo mkdir -p /srv/trading/redis
-sudo mkdir -p /srv/trading/questdb
-sudo mkdir -p /mnt/fastdrive/trading/prometheus
-sudo mkdir -p /mnt/fastdrive/trading/grafana
-sudo mkdir -p /mnt/fastdrive/trading/pulsar
+sudo mkdir -p /srv/trading/config/{traefik,redis,prometheus,grafana,loki,pulsar,promtail}
+sudo mkdir -p /srv/trading/config/letsencrypt
+sudo mkdir -p /srv/trading/logs
+sudo mkdir -p /mnt/fastdrive/trading/{questdb,prometheus,grafana,pulsar,weaviate}
+sudo mkdir -p /mnt/bulkdata/trading/{minio,backups}
 
 # Set proper ownership (replace $USER with actual username if needed)
 sudo chown -R $USER:$USER /srv/trading
 sudo chown -R $USER:$USER /mnt/fastdrive/trading
+sudo chown -R $USER:$USER /mnt/bulkdata/trading
+
+# Set proper permissions for Let's Encrypt
+sudo chmod 600 /srv/trading/config/letsencrypt/acme.json
 
 # Verify directories exist
 ls -la /srv/trading/
 ls -la /mnt/fastdrive/trading/
+ls -la /mnt/bulkdata/trading/
 ```
 
 ### Phase 1 Deployment Commands
@@ -29,37 +35,49 @@ ls -la /mnt/fastdrive/trading/
 # Navigate to project directory
 cd /home/nilante/main-nilante-server/ai-trading-system
 
-# Start infrastructure services
-docker-compose -f infrastructure/docker/docker-compose.infrastructure.yml up -d
+# For production deployment, use production compose file
+docker-compose -f infrastructure/docker/docker-compose.production.yml up -d
 
 # Check service status
-docker-compose -f infrastructure/docker/docker-compose.infrastructure.yml ps
+docker-compose -f infrastructure/docker/docker-compose.production.yml ps
 
 # View logs if needed
-docker-compose -f infrastructure/docker/docker-compose.infrastructure.yml logs
+docker-compose -f infrastructure/docker/docker-compose.production.yml logs
 
-# Health check all services
-make health-check-infrastructure
+# Health check all services (production endpoints)
+curl -f https://trading.main-nilante.com/prometheus/api/v1/targets  # Prometheus
+curl -f https://trading.main-nilante.com/questdb/status           # QuestDB  
+curl -f https://trading.main-nilante.com/grafana/api/health       # Grafana
+curl -f http://127.0.0.1:6379 && echo "PING" | redis-cli         # Redis
+curl -f http://127.0.0.1:8080/v1/.well-known/ready              # Weaviate
+curl -f http://127.0.0.1:9001/minio/health/live                 # MinIO
 ```
 
 ### Expected Services After Phase 1
 
-- **Traefik**: Reverse proxy at port 8081
-- **Redis**: Cache at port 6379
-- **QuestDB**: Time-series DB at port 9000
-- **Prometheus**: Metrics at port 9090
-- **Grafana**: Dashboards at port 3001
-- **Pulsar**: Message broker at port 6650
-- **Loki**: Log aggregation at port 3100
-- **Node Exporter**: System metrics at port 9100
-- **cAdvisor**: Container metrics at port 8082
+- **Traefik**: Reverse proxy and load balancer (ports 80, 443, 8081, 8082)
+- **Redis**: Cache and session store (port 6379, localhost only)
+- **QuestDB**: Time-series database (ports 9000, 8812, 9009, localhost only)
+- **Prometheus**: Metrics collection (port 9090, localhost only)
+- **Grafana**: Monitoring dashboards (port 3001, localhost only)
+- **Pulsar**: Message streaming broker (ports 6650, 8083, localhost only)
+- **Weaviate**: Vector database for AI (ports 8080, 50051, localhost only)
+- **MinIO**: Object storage (ports 9001, 9002, localhost only)
+- **Loki**: Log aggregation (port 3100, localhost only)
+- **Node Exporter**: System metrics (port 9100, localhost only)
+- **cAdvisor**: Container metrics (port 8084, localhost only)
+- **Promtail**: Log collection agent
 
-### Access URLs
+### Access URLs (Production)
 
-- **Grafana Dashboard**: http://localhost:3001 (admin/admin123)
-- **Prometheus**: http://localhost:9090
-- **QuestDB Console**: http://localhost:9000
-- **Traefik Dashboard**: http://localhost:8081
+- **Main Trading Interface**: https://trading.main-nilante.com/
+- **Grafana Dashboard**: https://trading.main-nilante.com/grafana (admin/TradingSystem2024!)
+- **Prometheus**: https://trading.main-nilante.com/prometheus
+- **QuestDB Console**: https://trading.main-nilante.com/questdb
+- **Traefik Dashboard**: https://trading.main-nilante.com/traefik
+- **Weaviate API**: https://trading.main-nilante.com/weaviate
+- **MinIO Console**: https://trading.main-nilante.com/minio (admin/TradingSystem2024!)
+- **Pulsar Admin**: https://trading.main-nilante.com/pulsar
 
 ### Verification Steps
 

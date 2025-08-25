@@ -25,43 +25,44 @@ networks:
 
 # Volumes for persistent data with server deployment paths
 volumes:
-  # Hot data - using local user directories for development
+  # Hot data - Redis on primary NVMe (/srv/) for application runtime performance
   redis-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/nilante/trading-data/redis
+      device: /srv/trading/redis
   
+  # Time-series data - QuestDB on dedicated fast storage (/mnt/fastdrive/)
   questdb-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/nilante/trading-data/questdb
+      device: /mnt/fastdrive/trading/questdb
       
-  # Warm data on second NVMe (/mnt/fastdrive/)
+  # Monitoring data on dedicated fast storage (/mnt/fastdrive/)
   prometheus-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/nilante/trading-data/prometheus
+      device: /mnt/fastdrive/trading/prometheus
       
   grafana-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/nilante/trading-data/grafana
+      device: /mnt/fastdrive/trading/grafana
   
-  # Pulsar data on warm storage
+  # Message streaming - Pulsar on warm storage (/mnt/fastdrive/)
   pulsar-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/nilante/trading-data/pulsar
+      device: /mnt/fastdrive/trading/pulsar
 
 services:
   # Reverse Proxy and Load Balancer
@@ -351,12 +352,8 @@ services:
       - "6650:6650"    # Pulsar binary protocol
       - "8083:8080"    # Pulsar admin REST API (avoid conflict)
     command: bin/pulsar standalone
-    environment:
-      - PULSAR_MEM="-Xms2g -Xmx8g -XX:MaxDirectMemorySize=4g"
-      - PULSAR_GC="-XX:+UseG1GC"
     volumes:
       - pulsar-data:/pulsar/data
-      - ./pulsar/conf:/pulsar/conf:ro
     networks:
       - trading-backend
       - trading-data

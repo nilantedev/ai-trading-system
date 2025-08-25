@@ -165,6 +165,76 @@ class RedisClient:
         data = await self.client.lrange(key, start, end)
         return [json.loads(item) for item in data]
     
+    async def get(self, key: str) -> Optional[str]:
+        """Get a string value from Redis."""
+        try:
+            return await self.client.get(key)
+        except Exception as e:
+            logger.error("Failed to get from Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis get failed: {e}")
+    
+    async def set(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
+        """Set a string value in Redis."""
+        try:
+            result = await self.client.set(key, value, ex=ttl)
+            return bool(result)
+        except Exception as e:
+            logger.error("Failed to set in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis set failed: {e}")
+    
+    async def setex(self, key: str, ttl: int, value: str) -> bool:
+        """Set a value with expiration time."""
+        try:
+            result = await self.client.setex(key, ttl, value)
+            return bool(result)
+        except Exception as e:
+            logger.error("Failed to setex in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis setex failed: {e}")
+    
+    async def delete(self, key: str) -> int:
+        """Delete a key from Redis."""
+        try:
+            return await self.client.delete(key)
+        except Exception as e:
+            logger.error("Failed to delete from Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis delete failed: {e}")
+    
+    async def exists(self, key: str) -> bool:
+        """Check if key exists in Redis."""
+        try:
+            return bool(await self.client.exists(key))
+        except Exception as e:
+            logger.error("Failed to check exists in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis exists failed: {e}")
+    
+    async def sadd(self, key: str, *values: str) -> int:
+        """Add members to a set."""
+        try:
+            return await self.client.sadd(key, *values)
+        except Exception as e:
+            logger.error("Failed to sadd in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis sadd failed: {e}")
+    
+    async def srem(self, key: str, *values: str) -> int:
+        """Remove members from a set."""
+        try:
+            return await self.client.srem(key, *values)
+        except Exception as e:
+            logger.error("Failed to srem in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis srem failed: {e}")
+    
+    async def smembers(self, key: str) -> set:
+        """Get all members of a set."""
+        try:
+            return await self.client.smembers(key)
+        except Exception as e:
+            logger.error("Failed to smembers in Redis", key=key, error=str(e))
+            raise DatabaseError(f"Redis smembers failed: {e}")
+    
+    async def close(self) -> None:
+        """Close the Redis connection (alias for disconnect)."""
+        await self.disconnect()
+
     async def health_check(self) -> Dict[str, Any]:
         """Perform Redis health check."""
         try:

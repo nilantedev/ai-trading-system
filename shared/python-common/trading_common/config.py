@@ -4,22 +4,94 @@ import os
 from functools import lru_cache
 from typing import Optional, List, Dict, Any
 
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
 class DatabaseSettings(BaseSettings):
-    """Database configuration settings."""
+    """Database configuration settings with dual environment support."""
     
+    # Redis configuration
     redis_url: str = Field(default="redis://localhost:6379/0")
+    redis_host: str = Field(default="localhost")
+    redis_port: int = Field(default=6379)
+    redis_db: int = Field(default=0)
+    redis_password: Optional[str] = Field(default=None)
+    
+    # QuestDB configuration  
     questdb_host: str = Field(default="localhost")
-    questdb_port: int = Field(default=9000)
+    questdb_http_port: int = Field(default=9000)
+    questdb_pg_port: int = Field(default=8812)
+    questdb_influx_port: int = Field(default=9009)
     questdb_user: Optional[str] = Field(default=None)
     questdb_password: Optional[str] = Field(default=None)
+    questdb_database: str = Field(default="qdb")
     
+    # PostgreSQL (optional)
     postgres_url: Optional[str] = Field(default=None)
+    postgres_host: Optional[str] = Field(default=None)
+    postgres_port: int = Field(default=5432)
+    postgres_user: Optional[str] = Field(default=None)
+    postgres_password: Optional[str] = Field(default=None)
+    postgres_database: Optional[str] = Field(default=None)
+    
+    # Vector and Graph databases
     weaviate_url: str = Field(default="http://localhost:8080")
+    weaviate_host: str = Field(default="localhost")
+    weaviate_port: int = Field(default=8080)
+    
     arangodb_url: str = Field(default="http://localhost:8529")
+    arangodb_host: str = Field(default="localhost")
+    arangodb_port: int = Field(default=8529)
+    arangodb_user: str = Field(default="root")
+    arangodb_password: Optional[str] = Field(default=None)
+    
+    # Connection pool settings
+    redis_max_connections: int = Field(default=30)
+    questdb_min_pool_size: int = Field(default=5)
+    questdb_max_pool_size: int = Field(default=25)
+    connection_timeout: int = Field(default=30)
+    
+    @field_validator('redis_url', mode='before')
+    @classmethod
+    def build_redis_url(cls, v, info):
+        """Build Redis URL from components if not provided."""
+        if v and v != "redis://localhost:6379/0":
+            return v
+        
+        values = info.data if info else {}
+        host = values.get('redis_host', 'localhost')
+        port = values.get('redis_port', 6379)
+        db = values.get('redis_db', 0)
+        password = values.get('redis_password')
+        
+        if password:
+            return f"redis://:{password}@{host}:{port}/{db}"
+        return f"redis://{host}:{port}/{db}"
+    
+    @field_validator('weaviate_url', mode='before')
+    @classmethod
+    def build_weaviate_url(cls, v, info):
+        """Build Weaviate URL from components if not provided."""
+        if v and v != "http://localhost:8080":
+            return v
+            
+        values = info.data if info else {}
+        host = values.get('weaviate_host', 'localhost')
+        port = values.get('weaviate_port', 8080)
+        return f"http://{host}:{port}"
+        
+    @field_validator('arangodb_url', mode='before')
+    @classmethod
+    def build_arangodb_url(cls, v, info):
+        """Build ArangoDB URL from components if not provided."""
+        if v and v != "http://localhost:8529":
+            return v
+            
+        values = info.data if info else {}
+        host = values.get('arangodb_host', 'localhost')
+        port = values.get('arangodb_port', 8529)
+        return f"http://{host}:{port}"
     
     class Config:
         env_prefix = "DB_"
@@ -104,7 +176,8 @@ class SecuritySettings(BaseSettings):
     rate_limit_requests: int = Field(default=100)
     rate_limit_window: int = Field(default=60)
     
-    @validator('cors_origins', pre=True)
+    @field_validator('cors_origins', mode='before')
+    @classmethod
     def parse_cors_origins(cls, v):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(',')]
@@ -135,7 +208,8 @@ class Settings(BaseSettings):
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     
-    @validator('debug', pre=True)
+    @field_validator('debug', mode='before')
+    @classmethod
     def parse_debug(cls, v):
         if isinstance(v, str):
             return v.lower() in ('true', '1', 'yes', 'on')
