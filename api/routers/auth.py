@@ -4,7 +4,7 @@ Authentication API Router for AI Trading System
 Provides login, token refresh, and authentication management endpoints.
 """
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from datetime import datetime, timedelta
@@ -51,7 +51,7 @@ class UserProfile(BaseModel):
 
 
 @router.post("/auth/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """
     Login endpoint to obtain JWT access token.
     
@@ -63,10 +63,13 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     - access_token: JWT token for API authentication
     - expires_in: Token expiry time in seconds
     """
-    # Authenticate user
-    user = authenticate_user(form_data.username, form_data.password)
+    # Get client IP address
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Authenticate user with persistent brute force protection
+    user = await authenticate_user(form_data.username, form_data.password, client_ip)
     if not user:
-        logger.warning(f"Failed login attempt for username: {form_data.username}")
+        logger.warning(f"Failed login attempt for username: {form_data.username} from {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -79,7 +82,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     
     expires_at = datetime.utcnow() + access_token_expires
     
-    logger.info(f"User {user.username} logged in successfully")
+    logger.info(f"User {user.username} logged in successfully from {client_ip}")
     
     return {
         "access_token": access_token,
@@ -90,7 +93,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 @router.post("/auth/login-json", response_model=Token)
-async def login_json(login_data: LoginRequest):
+async def login_json(request: Request, login_data: LoginRequest):
     """
     JSON login endpoint (alternative to OAuth2 form).
     
@@ -102,10 +105,13 @@ async def login_json(login_data: LoginRequest):
     - access_token: JWT token for API authentication
     - expires_in: Token expiry time in seconds
     """
-    # Authenticate user
-    user = authenticate_user(login_data.username, login_data.password)
+    # Get client IP address
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Authenticate user with persistent brute force protection
+    user = await authenticate_user(login_data.username, login_data.password, client_ip)
     if not user:
-        logger.warning(f"Failed JSON login attempt for username: {login_data.username}")
+        logger.warning(f"Failed JSON login attempt for username: {login_data.username} from {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
@@ -117,7 +123,7 @@ async def login_json(login_data: LoginRequest):
     
     expires_at = datetime.utcnow() + access_token_expires
     
-    logger.info(f"User {user.username} logged in successfully via JSON")
+    logger.info(f"User {user.username} logged in successfully via JSON from {client_ip}")
     
     return {
         "access_token": access_token,

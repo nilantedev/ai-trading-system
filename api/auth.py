@@ -8,7 +8,7 @@ import os
 import secrets
 import sys
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -16,18 +16,30 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 from enum import Enum
 import logging
+import hashlib
+import hmac
+from collections import defaultdict
+import asyncio
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from trading_common import get_settings
+from trading_common import get_settings, get_logger
+from trading_common.security_store import (
+    get_security_store, log_security_event, SecurityEventType,
+    UserSession, RefreshToken
+)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 settings = get_settings()
 
 # Security configuration
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Brute force protection - now using persistent store
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_DURATION = 300  # 5 minutes in seconds
 
 # JWT configuration - use unified settings
 JWT_SECRET_KEY = settings.security.secret_key
@@ -48,12 +60,19 @@ if settings.environment == "production" and JWT_SECRET_KEY == "dev-secret-change
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")  # Pre-hashed bcrypt password
 
-# If no admin password hash is provided, create one for demo (MUST be changed in production)
+# Enforce password hash requirement in non-development environments
 if not ADMIN_PASSWORD_HASH:
-    # Default password: "TradingSystem2024!" - CHANGE THIS IN PRODUCTION
-    default_password = os.getenv("ADMIN_PASSWORD", "TradingSystem2024!")
-    ADMIN_PASSWORD_HASH = pwd_context.hash(default_password)
-    logger.warning("Using default admin password - CHANGE THIS IN PRODUCTION!")
+    if settings.environment != "development":
+        logger.critical("ADMIN_PASSWORD_HASH must be set in non-development environments!")
+        raise ValueError("Security Error: ADMIN_PASSWORD_HASH is required for this environment")
+    else:
+        # Development only: generate hash from ADMIN_PASSWORD env var
+        dev_password = os.getenv("ADMIN_PASSWORD")
+        if not dev_password:
+            logger.critical("Either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD must be set")
+            raise ValueError("Security Error: Admin credentials not configured")
+        ADMIN_PASSWORD_HASH = pwd_context.hash(dev_password)
+        logger.warning("Development mode: Using ADMIN_PASSWORD env var (not for production)")
 
 
 class UserRole(str, Enum):
@@ -84,7 +103,11 @@ class TokenData(BaseModel):
     iat: datetime
     iss: str = "ai-trading-system"
     aud: str = "trading-api"
+    jti: Optional[str] = None  # JWT ID for token revocation
 
+
+# Token storage now handled by persistent security store
+# revoked_tokens and refresh_tokens replaced with Redis-backed store
 
 # Predefined users (in production, use database)
 SYSTEM_USERS = {
@@ -118,17 +141,91 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def authenticate_user(username: str, password: str) -> Optional[User]:
-    """Authenticate user with username and password."""
+async def check_brute_force(username: str) -> bool:
+    """Check if account is locked due to brute force attempts using persistent store."""
+    try:
+        security_store = await get_security_store()
+        is_locked = await security_store.is_account_locked(username, MAX_LOGIN_ATTEMPTS)
+        
+        if is_locked:
+            logger.warning(f"Account {username} is locked due to excessive failed login attempts")
+            
+            # Log security event for account lockout
+            await log_security_event(
+                event_type=SecurityEventType.ACCOUNT_LOCKED,
+                success=False,
+                username=username,
+                details={"max_attempts": MAX_LOGIN_ATTEMPTS, "lockout_duration": LOCKOUT_DURATION},
+                severity="WARNING"
+            )
+        
+        return is_locked
+    except Exception as e:
+        logger.error(f"Error checking brute force protection: {e}")
+        # Fail open to avoid blocking legitimate users due to store issues
+        return False
+
+async def record_failed_login(username: str, ip_address: Optional[str] = None):
+    """Record a failed login attempt using persistent store."""
+    try:
+        security_store = await get_security_store()
+        attempt_count = await security_store.record_login_attempt(username, False, ip_address or "unknown")
+        
+        logger.warning(f"Failed login attempt for {username}. Total recent attempts: {attempt_count}")
+        
+        # Log security event for failed login
+        await log_security_event(
+            event_type=SecurityEventType.LOGIN_FAILURE,
+            success=False,
+            username=username,
+            ip_address=ip_address,
+            details={"attempt_count": attempt_count},
+            severity="WARNING" if attempt_count >= MAX_LOGIN_ATTEMPTS - 1 else "INFO"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error recording failed login attempt: {e}")
+
+async def record_successful_login(username: str, ip_address: Optional[str] = None):
+    """Record a successful login attempt using persistent store."""
+    try:
+        security_store = await get_security_store()
+        await security_store.record_login_attempt(username, True, ip_address or "unknown")
+        
+        # Log security event for successful login
+        await log_security_event(
+            event_type=SecurityEventType.LOGIN_SUCCESS,
+            success=True,
+            username=username,
+            ip_address=ip_address,
+            details={},
+            severity="INFO"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error recording successful login attempt: {e}")
+
+async def authenticate_user(username: str, password: str, ip_address: Optional[str] = None) -> Optional[User]:
+    """Authenticate user with username and password using persistent security store."""
+    # Check brute force protection
+    if await check_brute_force(username):
+        return None
+    
     user_data = SYSTEM_USERS.get(username)
     if not user_data:
+        await record_failed_login(username, ip_address)
         return None
     
     if not verify_password(password, user_data["password_hash"]):
+        await record_failed_login(username, ip_address)
         return None
     
     if not user_data["is_active"]:
+        await record_failed_login(username, ip_address)
         return None
+    
+    # Record successful login (clears failed attempts automatically)
+    await record_successful_login(username, ip_address)
     
     # Update last login
     user_data["last_login"] = datetime.utcnow()
@@ -143,13 +240,17 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
     else:
         expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRY_MINUTES)
     
+    # Add unique token ID for revocation
+    token_id = secrets.token_urlsafe(32)
+    
     token_data = TokenData(
         user_id=user.user_id,
         username=user.username,
         roles=user.roles,
         permissions=user.permissions,
         exp=expire,
-        iat=datetime.utcnow()
+        iat=datetime.utcnow(),
+        jti=token_id  # JWT ID for revocation
     )
     
     return jwt.encode(
@@ -158,11 +259,102 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
         algorithm=JWT_ALGORITHM
     )
 
+async def create_refresh_token(user: User) -> str:
+    """Create refresh token for user using persistent store."""
+    return await store_refresh_token(user)
 
-def verify_access_token(token: str) -> TokenData:
-    """Verify and decode JWT access token."""
+async def store_refresh_token(user: User) -> str:
+    """Store refresh token in persistent security store."""
+    token = secrets.token_urlsafe(64)
+    security_store = await get_security_store()
+    
+    token_data = RefreshToken(
+        token_hash="",  # Will be generated by security store
+        user_id=user.user_id,
+        username=user.username,
+        created_at=datetime.utcnow(),
+        expires_at=datetime.utcnow() + timedelta(days=30)
+    )
+    
+    await security_store.store_refresh_token(token, token_data)
+    return token
+
+async def refresh_access_token(refresh_token: str) -> Optional[Tuple[str, str]]:
+    """Refresh access token using persistent store."""
+    security_store = await get_security_store()
+    token_data = await security_store.get_refresh_token(refresh_token)
+    
+    if not token_data or token_data.is_revoked:
+        return None
+    
+    # Check if token is expired
+    if token_data.expires_at < datetime.utcnow():
+        return None
+    
+    # Get user
+    user_data = SYSTEM_USERS.get(token_data.username)
+    if not user_data or not user_data["is_active"]:
+        return None
+    
+    user = User(**{k: v for k, v in user_data.items() if k != "password_hash"})
+    
+    # Create new access token
+    new_access_token = create_access_token(user)
+    
+    # Rotate refresh token (remove old, create new)
+    await security_store.revoke_refresh_token(refresh_token)
+    new_refresh_token = await store_refresh_token(user)
+    
+    # Log security event
+    await log_security_event(
+        event_type=SecurityEventType.TOKEN_REFRESH,
+        success=True,
+        user_id=user.user_id,
+        username=user.username
+    )
+    
+    return new_access_token, new_refresh_token
+
+async def revoke_token(token: str):
+    """Revoke an access token using persistent store."""
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        
+        if jti and exp:
+            expires_at = datetime.fromtimestamp(exp)
+            security_store = await get_security_store()
+            await security_store.revoke_token(jti, expires_at)
+            
+            # Log security event
+            await log_security_event(
+                event_type=SecurityEventType.TOKEN_REVOKED,
+                success=True,
+                user_id=payload.get("user_id"),
+                username=payload.get("username"),
+                details={"token_jti": jti}
+            )
+            
+            logger.info(f"Token {jti} revoked")
+    except JWTError as e:
+        logger.warning(f"Failed to revoke token: {e}")
+
+
+async def verify_access_token(token: str) -> TokenData:
+    """Verify and decode JWT access token using persistent store."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        
+        # Check if token is revoked using persistent store
+        jti = payload.get("jti")
+        if jti:
+            security_store = await get_security_store()
+            if await security_store.is_token_revoked(jti):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked"
+                )
         
         # Validate required fields
         user_id = payload.get("user_id")
@@ -203,7 +395,7 @@ def verify_access_token(token: str) -> TokenData:
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
     """Get current authenticated user from JWT token."""
-    token_data = verify_access_token(credentials.credentials)
+    token_data = await verify_access_token(credentials.credentials)
     
     # Get user from system users
     user_data = SYSTEM_USERS.get(token_data.username)
@@ -232,7 +424,7 @@ async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] 
         return None
     
     try:
-        token_data = verify_access_token(credentials.credentials)
+        token_data = await verify_access_token(credentials.credentials)
         
         # Get user from system users
         user_data = SYSTEM_USERS.get(token_data.username)
@@ -268,25 +460,6 @@ def require_role(role: UserRole):
     return role_checker
 
 
-async def get_optional_user(
-    authorization: Optional[str] = Depends(lambda: None)
-) -> Optional[User]:
-    """Optional authentication for public endpoints."""
-    if not authorization:
-        return None
-    
-    try:
-        if authorization.startswith("Bearer "):
-            credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=authorization[7:]
-            )
-            return await get_current_user(credentials)
-    except HTTPException:
-        # Invalid token - return None for optional auth
-        pass
-    
-    return None
 
 
 # Health check for auth system

@@ -267,8 +267,21 @@ class Settings(BaseSettings):
         # Check admin password
         admin_password = os.getenv("ADMIN_PASSWORD")
         admin_password_hash = os.getenv("ADMIN_PASSWORD_HASH")
-        if admin_password == "TradingSystem2024!" and not admin_password_hash:
-            issues.append("CRITICAL: Using default admin password in production! Set ADMIN_PASSWORD_HASH")
+        
+        # Strict check for production environments
+        if self.environment == "production":
+            if not admin_password_hash:
+                issues.append("CRITICAL: ADMIN_PASSWORD_HASH must be set in production!")
+            if admin_password:
+                issues.append("CRITICAL: Plain text ADMIN_PASSWORD should not be used in production!")
+            
+        # Check for known default passwords
+        default_passwords = ["TradingSystem2024!", "admin", "password", "123456", "default"]
+        if admin_password and any(pwd in admin_password for pwd in default_passwords):
+            if self.environment == "production":
+                issues.append("CRITICAL: Default or weak admin password detected in production!")
+            else:
+                issues.append("WARNING: Using default/weak admin password - change before production")
             
         return issues
     
@@ -301,6 +314,17 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+# Enhanced settings with secrets vault support (opt-in)
+def get_settings_with_vault():
+    """Get settings with secrets vault integration."""
+    try:
+        from .config_secrets import get_enhanced_settings
+        return get_enhanced_settings()
+    except ImportError:
+        # Fall back to base settings if vault integration not available
+        return get_settings()
 
 
 def get_database_url(db_type: str = "redis") -> str:

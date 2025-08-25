@@ -13,6 +13,12 @@ import os
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_pulsar_client
+from trading_common.config_secrets import get_enhanced_settings_async
+from trading_common.secrets_vault import get_api_secrets
+from trading_common.resilience import (
+    get_circuit_breaker, CircuitBreakerConfig, RetryStrategy, RetryConfig,
+    RateLimiter, BulkheadPool, with_retry, with_circuit_breaker
+)
 from .smart_data_filter import filter_market_data, get_filtering_performance
 
 logger = get_logger(__name__)
@@ -20,7 +26,7 @@ settings = get_settings()
 
 
 class MarketDataService:
-    """Handles real-time market data ingestion from multiple sources."""
+    """Handles real-time market data ingestion from multiple sources with resilience patterns."""
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
@@ -28,27 +34,141 @@ class MarketDataService:
         self.pulsar_client = None
         self.producer = None
         
-        # API configurations
+        # API configurations - will be loaded from vault
         self.alpaca_config = {
-            'api_key': os.getenv('ALPACA_API_KEY'),
-            'secret_key': os.getenv('ALPACA_SECRET_KEY'),
+            'api_key': None,
+            'secret_key': None,
             'base_url': 'https://paper-api.alpaca.markets' if settings.trading.paper_trading else 'https://api.alpaca.markets',
             'data_url': 'https://data.alpaca.markets'
         }
         
         self.polygon_config = {
-            'api_key': os.getenv('POLYGON_API_KEY'),
+            'api_key': None,
             'base_url': 'https://api.polygon.io'
         }
         
         self.alpha_vantage_config = {
-            'api_key': os.getenv('ALPHA_VANTAGE_API_KEY'),
+            'api_key': None,
             'base_url': 'https://www.alphavantage.co/query'
         }
+        
+        # Initialize resilience patterns for each data vendor
+        self._init_resilience_patterns()
+    
+    def _init_resilience_patterns(self):
+        """Initialize resilience patterns for external data vendors."""
+        # Circuit breaker configurations for each vendor
+        alpaca_cb_config = CircuitBreakerConfig(
+            failure_threshold=3,  # Open after 3 failures
+            recovery_timeout=30,  # Try recovery after 30 seconds
+            success_threshold=2   # Close after 2 successes
+        )
+        polygon_cb_config = CircuitBreakerConfig(
+            failure_threshold=3,
+            recovery_timeout=45,  # Polygon might need longer recovery
+            success_threshold=2
+        )
+        alpha_vantage_cb_config = CircuitBreakerConfig(
+            failure_threshold=2,  # Alpha Vantage has stricter limits
+            recovery_timeout=60,  # Longer recovery due to rate limits
+            success_threshold=1
+        )
+        
+        # Initialize circuit breakers
+        self.alpaca_circuit_breaker = get_circuit_breaker("alpaca_data_api", alpaca_cb_config)
+        self.polygon_circuit_breaker = get_circuit_breaker("polygon_data_api", polygon_cb_config)
+        self.alpha_vantage_circuit_breaker = get_circuit_breaker("alpha_vantage_api", alpha_vantage_cb_config)
+        
+        # Retry strategies for each vendor
+        self.alpaca_retry = RetryStrategy(RetryConfig(
+            max_attempts=3,
+            initial_delay=1.0,
+            max_delay=10.0,
+            exponential_base=2.0,
+            jitter=True
+        ))
+        self.polygon_retry = RetryStrategy(RetryConfig(
+            max_attempts=3,
+            initial_delay=1.5,
+            max_delay=15.0,
+            exponential_base=2.0,
+            jitter=True
+        ))
+        self.alpha_vantage_retry = RetryStrategy(RetryConfig(
+            max_attempts=2,  # Lower attempts due to stricter rate limits
+            initial_delay=2.0,
+            max_delay=30.0,
+            exponential_base=2.5,
+            jitter=True
+        ))
+        
+        # Rate limiters based on each vendor's API limits
+        self.alpaca_rate_limiter = RateLimiter(rate=200, per=60)  # 200 requests/minute
+        self.polygon_rate_limiter = RateLimiter(rate=100, per=60)  # 100 requests/minute (basic plan)
+        self.alpha_vantage_rate_limiter = RateLimiter(rate=5, per=60)  # 5 requests/minute (free tier)
+        
+        # Bulkhead pools for request isolation
+        self.alpaca_bulkhead = BulkheadPool(max_concurrent=5)
+        self.polygon_bulkhead = BulkheadPool(max_concurrent=3)
+        self.alpha_vantage_bulkhead = BulkheadPool(max_concurrent=1)  # Very conservative
+        
+        logger.info("Resilience patterns initialized for all data vendors")
+    
+    async def _load_api_secrets(self):
+        """Load API secrets from vault."""
+        try:
+            # Load API secrets from vault with fallback to environment
+            api_secrets = await get_api_secrets()
+            
+            # Update configurations with vault secrets
+            if api_secrets.get('alpaca_api_key'):
+                self.alpaca_config['api_key'] = api_secrets['alpaca_api_key']
+            else:
+                # Fallback to environment
+                self.alpaca_config['api_key'] = os.getenv('ALPACA_API_KEY')
+                
+            if api_secrets.get('alpaca_secret_key'):
+                self.alpaca_config['secret_key'] = api_secrets['alpaca_secret_key']
+            else:
+                self.alpaca_config['secret_key'] = os.getenv('ALPACA_SECRET_KEY')
+                
+            if api_secrets.get('polygon_api_key'):
+                self.polygon_config['api_key'] = api_secrets['polygon_api_key']
+            else:
+                self.polygon_config['api_key'] = os.getenv('POLYGON_API_KEY')
+                
+            if api_secrets.get('alpha_vantage_api_key'):
+                self.alpha_vantage_config['api_key'] = api_secrets['alpha_vantage_api_key']
+            else:
+                self.alpha_vantage_config['api_key'] = os.getenv('ALPHA_VANTAGE_API_KEY')
+            
+            # Log which APIs are configured (without revealing keys)
+            configured_apis = []
+            if self.alpaca_config['api_key']:
+                configured_apis.append("Alpaca")
+            if self.polygon_config['api_key']:
+                configured_apis.append("Polygon")
+            if self.alpha_vantage_config['api_key']:
+                configured_apis.append("Alpha Vantage")
+            
+            logger.info(f"✅ API secrets loaded from vault. Configured APIs: {', '.join(configured_apis) or 'None'}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load API secrets from vault, falling back to environment: {e}")
+            # Fallback to environment variables
+            self.alpaca_config.update({
+                'api_key': os.getenv('ALPACA_API_KEY'),
+                'secret_key': os.getenv('ALPACA_SECRET_KEY'),
+            })
+            self.polygon_config['api_key'] = os.getenv('POLYGON_API_KEY')
+            self.alpha_vantage_config['api_key'] = os.getenv('ALPHA_VANTAGE_API_KEY')
     
     async def start(self):
         """Initialize service connections."""
         logger.info("Starting Market Data Service")
+        
+        # Load API secrets from vault first
+        await self._load_api_secrets()
         
         # Initialize HTTP session
         self.session = aiohttp.ClientSession(
@@ -171,8 +291,12 @@ class MarketDataService:
                 await asyncio.sleep(5.0)  # Wait longer on error
     
     async def _get_alpaca_quote(self, symbol: str) -> Optional[MarketData]:
-        """Get quote from Alpaca API."""
-        try:
+        """Get quote from Alpaca API with resilience patterns."""
+        async def _make_alpaca_request():
+            # Rate limiting
+            if not await self.alpaca_rate_limiter.acquire():
+                raise Exception(f"Alpaca rate limit exceeded for {symbol}")
+            
             url = f"{self.alpaca_config['data_url']}/v2/stocks/{symbol}/quotes/latest"
             headers = {
                 'APCA-API-KEY-ID': self.alpaca_config['api_key'],
@@ -195,17 +319,32 @@ class MarketDataService:
                         timeframe='quote',
                         data_source='alpaca'
                     )
+                elif response.status == 429:
+                    raise Exception(f"Alpaca rate limit hit for {symbol}")
+                elif response.status >= 500:
+                    raise Exception(f"Alpaca server error {response.status} for {symbol}")
                 else:
                     logger.warning(f"Alpaca API error {response.status} for {symbol}")
-                    
-        except Exception as e:
-            logger.error(f"Alpaca quote error for {symbol}: {e}")
+                    return None
         
-        return None
+        try:
+            # Execute with full resilience stack: bulkhead -> circuit breaker -> retry
+            return await self.alpaca_bulkhead.execute(
+                lambda: self.alpaca_circuit_breaker.call(
+                    lambda: self.alpaca_retry.execute(_make_alpaca_request)
+                )
+            )
+        except Exception as e:
+            logger.error(f"Alpaca quote error for {symbol} after resilience patterns: {e}")
+            return None
     
     async def _get_polygon_quote(self, symbol: str) -> Optional[MarketData]:
-        """Get quote from Polygon API."""
-        try:
+        """Get quote from Polygon API with resilience patterns."""
+        async def _make_polygon_request():
+            # Rate limiting
+            if not await self.polygon_rate_limiter.acquire():
+                raise Exception(f"Polygon rate limit exceeded for {symbol}")
+            
             url = f"{self.polygon_config['base_url']}/v2/last/trade/{symbol}"
             params = {'apikey': self.polygon_config['api_key']}
             
@@ -225,17 +364,32 @@ class MarketDataService:
                         timeframe='quote',
                         data_source='polygon'
                     )
+                elif response.status == 429:
+                    raise Exception(f"Polygon rate limit hit for {symbol}")
+                elif response.status >= 500:
+                    raise Exception(f"Polygon server error {response.status} for {symbol}")
                 else:
                     logger.warning(f"Polygon API error {response.status} for {symbol}")
-                    
-        except Exception as e:
-            logger.error(f"Polygon quote error for {symbol}: {e}")
+                    return None
         
-        return None
+        try:
+            # Execute with full resilience stack: bulkhead -> circuit breaker -> retry
+            return await self.polygon_bulkhead.execute(
+                lambda: self.polygon_circuit_breaker.call(
+                    lambda: self.polygon_retry.execute(_make_polygon_request)
+                )
+            )
+        except Exception as e:
+            logger.error(f"Polygon quote error for {symbol} after resilience patterns: {e}")
+            return None
     
     async def _get_alpha_vantage_quote(self, symbol: str) -> Optional[MarketData]:
-        """Get quote from Alpha Vantage API."""
-        try:
+        """Get quote from Alpha Vantage API with resilience patterns."""
+        async def _make_alpha_vantage_request():
+            # Rate limiting (very conservative for free tier)
+            if not await self.alpha_vantage_rate_limiter.acquire():
+                raise Exception(f"Alpha Vantage rate limit exceeded for {symbol}")
+            
             params = {
                 'function': 'GLOBAL_QUOTE',
                 'symbol': symbol,
@@ -246,6 +400,12 @@ class MarketDataService:
                 if response.status == 200:
                     data = await response.json()
                     quote = data.get('Global Quote', {})
+                    
+                    # Alpha Vantage returns error messages in response body
+                    if 'Error Message' in data:
+                        raise Exception(f"Alpha Vantage API error: {data['Error Message']}")
+                    if 'Note' in data:
+                        raise Exception(f"Alpha Vantage rate limit: {data['Note']}")
                     
                     if quote:
                         return MarketData(
@@ -259,13 +419,27 @@ class MarketDataService:
                             timeframe='quote',
                             data_source='alpha_vantage'
                         )
+                    else:
+                        logger.warning(f"Alpha Vantage: No quote data for {symbol}")
+                        return None
+                elif response.status == 429:
+                    raise Exception(f"Alpha Vantage rate limit hit for {symbol}")
+                elif response.status >= 500:
+                    raise Exception(f"Alpha Vantage server error {response.status} for {symbol}")
                 else:
                     logger.warning(f"Alpha Vantage API error {response.status} for {symbol}")
-                    
-        except Exception as e:
-            logger.error(f"Alpha Vantage quote error for {symbol}: {e}")
+                    return None
         
-        return None
+        try:
+            # Execute with full resilience stack: bulkhead -> circuit breaker -> retry
+            return await self.alpha_vantage_bulkhead.execute(
+                lambda: self.alpha_vantage_circuit_breaker.call(
+                    lambda: self.alpha_vantage_retry.execute(_make_alpha_vantage_request)
+                )
+            )
+        except Exception as e:
+            logger.error(f"Alpha Vantage quote error for {symbol} after resilience patterns: {e}")
+            return None
     
     async def _get_alpaca_historical(
         self, 
@@ -333,7 +507,7 @@ class MarketDataService:
             self.producer.send(message.encode('utf-8'))
     
     async def get_service_health(self) -> Dict:
-        """Get service health status."""
+        """Get service health status including resilience patterns."""
         health = {
             'service': 'market_data',
             'status': 'healthy',
@@ -347,23 +521,47 @@ class MarketDataService:
                 'http_session': self.session is not None,
                 'cache': self.cache is not None,
                 'message_producer': self.producer is not None
+            },
+            'resilience_patterns': {
+                'circuit_breakers': {
+                    'alpaca': self.alpaca_circuit_breaker.get_state(),
+                    'polygon': self.polygon_circuit_breaker.get_state(),
+                    'alpha_vantage': self.alpha_vantage_circuit_breaker.get_state()
+                },
+                'bulkhead_status': {
+                    'alpaca': self.alpaca_bulkhead.get_status(),
+                    'polygon': self.polygon_bulkhead.get_status(), 
+                    'alpha_vantage': self.alpha_vantage_bulkhead.get_status()
+                }
             }
         }
         
-        # Test data source connectivity
+        # Check if any circuit breakers are open (degraded service)
+        open_breakers = [
+            name for name, state in health['resilience_patterns']['circuit_breakers'].items()
+            if state['state'] == 'open'
+        ]
+        if open_breakers:
+            health['status'] = 'degraded'
+            health['degraded_reason'] = f"Circuit breakers open: {', '.join(open_breakers)}"
+        
+        # Test data source connectivity (if circuit breakers allow)
         if self.session and self.alpaca_config['api_key']:
             try:
                 test_symbol = 'SPY'
                 quote = await self._get_alpaca_quote(test_symbol)
                 health['data_sources']['alpaca_test'] = quote is not None
-            except:
+            except Exception as e:
                 health['data_sources']['alpaca_test'] = False
+                health['data_sources']['alpaca_test_error'] = str(e)
         
         return health
 
 
 # Global service instance
 market_data_service: Optional[MarketDataService] = None
+
+
 
 
 async def get_market_data_service() -> MarketDataService:

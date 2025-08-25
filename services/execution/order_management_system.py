@@ -14,6 +14,7 @@ import time
 from trading_common import get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_message_consumer, get_message_producer
+from trading_common.resilience import CircuitBreaker, CircuitBreakerConfig, RetryStrategy
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -312,6 +313,41 @@ class OrderManagementSystem:
         self.orders_processed = 0
         self.orders_filled = 0
         self.orders_rejected = 0
+        
+        # Resilience patterns
+        self.circuit_breakers = {
+            'broker_service': CircuitBreaker(
+                name='broker_service',
+                config=CircuitBreakerConfig(
+                    failure_threshold=5,
+                    recovery_timeout=30,
+                    success_threshold=2
+                )
+            ),
+            'risk_service': CircuitBreaker(
+                name='risk_service',
+                config=CircuitBreakerConfig(
+                    failure_threshold=3,
+                    recovery_timeout=15,
+                    success_threshold=2
+                )
+            ),
+            'validation_service': CircuitBreaker(
+                name='validation_service',
+                config=CircuitBreakerConfig(
+                    failure_threshold=10,
+                    recovery_timeout=10,
+                    success_threshold=3
+                )
+            )
+        }
+        
+        self.retry_strategy = RetryStrategy(
+            max_attempts=3,
+            base_delay=0.5,
+            max_delay=5.0,
+            exponential_base=2.0
+        )
         self.total_fill_value = 0.0
         
         # Order ID generation

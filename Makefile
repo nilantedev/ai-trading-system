@@ -3,7 +3,7 @@
 # Comprehensive build automation for the AI trading system
 # Supports all development phases with proper validation gates
 
-.PHONY: help init-dev start-infrastructure health-check clean-dev test lint build
+.PHONY: help init-dev start-infrastructure health-check clean-dev test lint build security-check
 
 # Default target
 help:
@@ -18,10 +18,25 @@ help:
 	@echo ""
 	@echo "🔧 Development Commands:"
 	@echo "  install-deps          Install all dependencies"
+	@echo "  test                  Run comprehensive test suite with coverage gates"
+	@echo "  test-fast             Run fast test subset for quick validation"
+	@echo "  test-unit             Run unit tests only"
+	@echo "  test-integration      Run integration tests only"
+	@echo "  test-property         Run property-based tests only"
+	@echo "  coverage              Generate coverage report"
+	@echo "  secrets-scan          Scan for hardcoded secrets"
+	@echo "  secrets-template      Generate secrets template"
+	@echo "  secrets-validate      Validate secrets access"
 	@echo "  build                 Build all components"
 	@echo "  test                  Run all tests"
 	@echo "  lint                  Run code quality checks"
 	@echo "  clean-dev             Clean development environment"
+	@echo ""
+	@echo "🔐 Security Commands:"
+	@echo "  security-check        Run security validation"
+	@echo "  check-secrets         Check for exposed secrets"
+	@echo "  generate-secret       Generate secure secret key"
+	@echo "  generate-password-hash Generate bcrypt password hash"
 	@echo ""
 	@echo "📋 Phase Management:"
 	@echo "  current-phase         Show current development phase"
@@ -157,7 +172,41 @@ build-services:
 	@echo "🔨 Building services..."
 	@echo "  (Services will be built in later phases)"
 
-test: test-shared test-infrastructure
+# =================================
+# Comprehensive Testing
+# =================================
+
+test: ## Run comprehensive test suite with coverage gates
+	@echo "🚀 Running comprehensive test suite..."
+	@$(PYTHON) scripts/run_tests_with_coverage_gates.py
+
+test-fast: ## Run fast test subset for quick validation  
+	@echo "🏃‍♂️ Running fast test suite..."
+	@$(PYTHON) scripts/run_tests_with_coverage_gates.py --fast
+
+test-unit: ## Run unit tests only
+	@echo "🧪 Running unit tests..."
+	@$(PYTHON) -m pytest tests/unit/ -v --cov=shared --cov=services --cov-report=term-missing -m unit
+
+test-integration: ## Run integration tests only
+	@echo "🔗 Running integration tests..."
+	@$(PYTHON) -m pytest tests/integration/ -v -m integration
+
+test-property: ## Run property-based tests only
+	@echo "🔍 Running property-based tests..."
+	@$(PYTHON) -m pytest tests/unit/test_property_based.py -v --hypothesis-show-statistics -m property
+
+test-security: ## Run security tests only
+	@echo "🔒 Running security tests..."
+	@$(PYTHON) -m pytest tests/security/ -v -m security
+
+test-performance: ## Run performance tests only
+	@echo "⚡ Running performance tests..."
+	@$(PYTHON) -m pytest tests/performance/ -v -m performance --tb=short
+
+coverage: ## Generate coverage report
+	@echo "📊 Generating coverage report..."
+	@$(PYTHON) -m pytest tests/unit/ tests/integration/ --cov=shared --cov=services --cov-report=html --cov-report=term-missing --cov-fail-under=70
 
 test-shared:
 	@echo "🧪 Running shared library tests..."
@@ -169,6 +218,26 @@ test-infrastructure:
 	@$(MAKE) health-check-infrastructure
 
 test-all: test
+
+# =================================
+# Secrets Management
+# =================================
+
+secrets-scan: ## Scan for hardcoded secrets and security issues
+	@echo "🔍 Scanning for hardcoded secrets..."
+	@$(PYTHON) scripts/manage_secrets.py scan
+
+secrets-template: ## Generate secrets template file
+	@echo "📋 Generating secrets template..."
+	@$(PYTHON) scripts/manage_secrets.py template
+
+secrets-validate: ## Validate secrets access and configuration
+	@echo "✅ Validating secrets configuration..."
+	@$(PYTHON) scripts/manage_secrets.py validate
+
+secrets-health: ## Check secrets vault health
+	@echo "🔍 Checking secrets vault health..."
+	@$(PYTHON) scripts/manage_secrets.py health
 
 lint: lint-python lint-rust
 
@@ -375,6 +444,62 @@ generate-docs:
 run-security-scan:
 	@echo "🔒 Running security scan..."
 	@echo "  (Security scanning will be implemented in later phases)"
+
+# =================================
+# Security Operations (Added 2024-08-25)
+# =================================
+
+security-check: ## Run security validation
+	@echo "🔐 Running security validation..."
+	@$(PYTHON) -m trading_common.security_validator --environment $(ENV) || \
+		(echo "❌ Security validation failed!" && exit 1)
+	@echo "✅ Security validation passed"
+
+check-secrets: ## Check for exposed secrets
+	@echo "🔍 Checking for exposed secrets..."
+	@! grep -r "TradingSystem2024\|password123\|secret_key\|default_password" \
+		--include="*.py" --exclude-dir=.venv . || \
+		(echo "❌ Found exposed secrets!" && exit 1)
+	@echo "✅ No exposed secrets found"
+
+generate-secret: ## Generate secure secret key
+	@echo "🔑 Generating secure secret key:"
+	@$(PYTHON) -c "import secrets; print(secrets.token_urlsafe(32))"
+
+generate-password-hash: ## Generate bcrypt password hash
+	@read -s -p "Enter password to hash: " password; \
+	echo; \
+	$(PYTHON) -c "from passlib.context import CryptContext; \
+		pwd_context = CryptContext(schemes=['bcrypt']); \
+		print(pwd_context.hash('$$password'))"
+
+validate-env: ## Validate environment variables for deployment
+	@echo "🔍 Validating environment..."
+	@if [ "$(ENV)" = "production" ] || [ "$(ENV)" = "staging" ]; then \
+		if [ -z "$$SECURITY_SECRET_KEY" ]; then \
+			echo "❌ SECURITY_SECRET_KEY required for $(ENV)"; \
+			exit 1; \
+		fi; \
+		if [ -z "$$ADMIN_PASSWORD_HASH" ]; then \
+			echo "❌ ADMIN_PASSWORD_HASH required for $(ENV)"; \
+			exit 1; \
+		fi; \
+	fi
+	@echo "✅ Environment validated for $(ENV)"
+
+# =================================
+# Testing Operations (Updated 2024-08-25)
+# =================================
+
+test-services: ## Run service tests with pytest
+	@echo "🧪 Running service tests..."
+	@$(PYTHON) -m pytest tests/test_services.py -v --tb=short
+
+test-coverage: ## Run tests with coverage report
+	@echo "🧪 Running tests with coverage..."
+	@$(PYTHON) -m pytest tests/ -v --cov=api --cov=services --cov=trading_common \
+		--cov-report=term-missing --cov-report=html
+	@echo "📊 Coverage report generated in htmlcov/"
 
 # =================================
 # Variables and Configuration

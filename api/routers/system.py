@@ -44,7 +44,7 @@ async def get_system_health(
         
         # Market Data Service
         try:
-            from services.ingestion.market_data_service import get_market_data_service
+            from services.data_ingestion.market_data_service import get_market_data_service
             service = await get_market_data_service()
             if hasattr(service, 'get_service_health'):
                 health = await service.get_service_health()

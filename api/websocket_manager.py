@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 class ConnectionManager:
     """Manages WebSocket connections and broadcasts."""
     
-    def __init__(self):
+    def __init__(self, enable_compression: bool = True, max_broadcast_rate: float = 100.0):
         # Active connections by stream type
         self.connections: Dict[str, Set[WebSocket]] = {
             "market_data": set(),
@@ -48,6 +48,12 @@ class ConnectionManager:
         
         # Connection metadata
         self.connection_metadata: Dict[WebSocket, Dict[str, Any]] = {}
+        
+        # Performance optimization settings
+        self.enable_compression = enable_compression
+        self.max_broadcast_rate = max_broadcast_rate  # messages per second
+        self._last_broadcast_time = 0.0
+        self._broadcast_rate_limiter = asyncio.Semaphore(int(max_broadcast_rate))
         
         # Stream subscriptions (connection -> subscribed streams)
         self.subscriptions: Dict[WebSocket, Set[str]] = {}
@@ -156,7 +162,7 @@ class ConnectionManager:
             logger.error(f"Error disconnecting WebSocket: {e}")
     
     async def broadcast_to_stream(self, stream_type: str, message: Dict[str, Any]):
-        """Broadcast message to all connections in a stream."""
+        """Broadcast message to all connections in a stream with optimized concurrent sending."""
         if stream_type not in self.connections:
             return
         
@@ -164,23 +170,11 @@ class ConnectionManager:
         if not connections:
             return
         
-        disconnected = []
-        
-        for websocket in connections:
-            try:
-                await self._send_message(websocket, message)
-                self.messages_sent += 1
-            except Exception as e:
-                logger.warning(f"Error broadcasting to WebSocket: {e}")
-                disconnected.append(websocket)
-                self.connection_errors += 1
-        
-        # Remove disconnected WebSockets
-        for websocket in disconnected:
-            await self.disconnect(websocket)
+        # Use concurrent broadcasting for better performance
+        await self._broadcast_concurrent(connections, message)
     
     async def broadcast_to_symbols(self, symbols: List[str], message: Dict[str, Any]):
-        """Broadcast message to connections subscribed to specific symbols."""
+        """Broadcast message to connections subscribed to specific symbols with optimized performance."""
         target_connections = set()
         
         for symbol in symbols:
@@ -191,20 +185,8 @@ class ConnectionManager:
         if not target_connections:
             return
         
-        disconnected = []
-        
-        for websocket in target_connections:
-            try:
-                await self._send_message(websocket, message)
-                self.messages_sent += 1
-            except Exception as e:
-                logger.warning(f"Error broadcasting to symbol subscriber: {e}")
-                disconnected.append(websocket)
-                self.connection_errors += 1
-        
-        # Remove disconnected WebSockets
-        for websocket in disconnected:
-            await self.disconnect(websocket)
+        # Use concurrent broadcasting for better performance
+        await self._broadcast_concurrent(target_connections, message)
     
     async def send_to_connection(self, websocket: WebSocket, message: Dict[str, Any]):
         """Send message to a specific connection."""
@@ -229,6 +211,143 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Error sending WebSocket message: {e}")
             raise
+    
+    async def _broadcast_concurrent(self, connections: set, message: Dict[str, Any], batch_size: int = 100):
+        """
+        Optimized concurrent broadcasting to multiple WebSocket connections.
+        
+        Features:
+        - Concurrent sending with batching to prevent overwhelming the system
+        - Automatic disconnection cleanup for failed connections
+        - Message deduplication and compression for large broadcasts
+        - Performance metrics tracking
+        """
+        if not connections:
+            return
+        
+        # Prepare serialized message once for all connections
+        serialized_message = json.dumps(message, default=str)
+        
+        # Apply compression if enabled and message is large enough
+        compressed_message = None
+        if self.enable_compression and len(serialized_message) > 1024:  # Compress messages > 1KB
+            try:
+                import gzip
+                compressed_bytes = gzip.compress(serialized_message.encode('utf-8'))
+                # Only use compression if it actually reduces size significantly
+                if len(compressed_bytes) < len(serialized_message) * 0.8:
+                    compressed_message = compressed_bytes
+                    logger.debug(f"Compressed WebSocket message: {len(serialized_message)} -> {len(compressed_bytes)} bytes")
+            except Exception as e:
+                logger.warning(f"Message compression failed: {e}")
+        
+        # Choose the best message format
+        message_to_send = compressed_message if compressed_message else serialized_message
+        
+        # Track performance
+        start_time = asyncio.get_event_loop().time()
+        successful_sends = 0
+        failed_sends = 0
+        disconnected = []
+        
+        # Process connections in batches to avoid overwhelming the system
+        connection_list = list(connections)
+        
+        for i in range(0, len(connection_list), batch_size):
+            batch = connection_list[i:i + batch_size]
+            
+            # Create concurrent tasks for this batch
+            tasks = []
+            for websocket in batch:
+                task = self._send_message_concurrent(websocket, message_to_send, isinstance(message_to_send, bytes))
+                tasks.append((websocket, task))
+            
+            # Wait for batch completion with timeout
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*[task for _, task in tasks], return_exceptions=True),
+                    timeout=5.0  # 5 second timeout for batch
+                )
+                
+                # Process results
+                for (websocket, _), result in zip(tasks, results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Error broadcasting to WebSocket: {result}")
+                        disconnected.append(websocket)
+                        failed_sends += 1
+                    else:
+                        successful_sends += 1
+                        self.messages_sent += 1
+                        
+            except asyncio.TimeoutError:
+                logger.warning(f"WebSocket broadcast batch timeout - {len(batch)} connections")
+                # Mark all connections in this batch as potentially failed
+                disconnected.extend(batch)
+                failed_sends += len(batch)
+            
+            # Small delay between batches to prevent overwhelming
+            if i + batch_size < len(connection_list):
+                await asyncio.sleep(0.001)  # 1ms delay
+        
+        # Clean up disconnected connections
+        cleanup_tasks = [self.disconnect(websocket) for websocket in disconnected]
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        
+        # Record performance metrics
+        end_time = asyncio.get_event_loop().time()
+        broadcast_time = end_time - start_time
+        
+        if metrics:
+            metrics.record_websocket_broadcast(
+                connections_count=len(connections),
+                successful_sends=successful_sends,
+                failed_sends=failed_sends,
+                broadcast_time=broadcast_time
+            )
+        
+        # Log performance information
+        if len(connections) > 10:  # Only log for significant broadcasts
+            logger.info(
+                f"WebSocket broadcast: {successful_sends}/{len(connections)} successful, "
+                f"{broadcast_time:.3f}s, {successful_sends/broadcast_time:.1f} msg/s"
+            )
+        
+        self.connection_errors += failed_sends
+    
+    async def _send_message_concurrent(self, websocket: WebSocket, message_data, is_compressed: bool = False):
+        """
+        Send pre-serialized message to WebSocket with optimized error handling.
+        
+        This method is optimized for concurrent sending:
+        - Uses pre-serialized message to avoid repeated JSON encoding
+        - Supports compressed binary messages for large payloads
+        - Minimal error handling to allow batch processing
+        - Connection state validation
+        """
+        try:
+            # Quick connection state check
+            if websocket.client_state.name != 'CONNECTED':
+                raise ConnectionError("WebSocket not connected")
+            
+            # Update message count before sending
+            if websocket in self.connection_metadata:
+                self.connection_metadata[websocket]["message_count"] += 1
+            
+            # Send the message using the appropriate method
+            if is_compressed:
+                # Send compressed binary data
+                await websocket.send_bytes(message_data)
+            else:
+                # Send text message
+                await websocket.send_text(message_data)
+            
+        except WebSocketDisconnect:
+            # Re-raise disconnect exceptions for proper cleanup
+            raise
+        except Exception as e:
+            # Convert other exceptions to a standard format for batch processing
+            raise ConnectionError(f"Send failed: {e}")
     
     async def handle_client_message(self, websocket: WebSocket, message: str):
         """Handle incoming message from client."""

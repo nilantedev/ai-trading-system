@@ -34,6 +34,7 @@ dependencies = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
+    "hypothesis>=6.90.0",
     "black>=23.10.0",
     "isort>=5.12.0",
     "flake8>=6.1.0",
@@ -170,6 +171,9 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "e2e: marks tests as end-to-end tests",
+    "property: marks tests as property-based tests",
+    "performance: marks tests as performance tests",
+    "security: marks tests as security tests",
 ]
 
 [tool.coverage.run]
@@ -191,3 +195,7 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+# Enforce coverage thresholds - fail build if below these levels
+fail_under = 70
+precision = 1
+show_missing = true

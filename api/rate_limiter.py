@@ -47,24 +47,38 @@ class RedisRateLimiter:
                     self.redis_url, 
                     password=self.redis_password,
                     encoding="utf-8",
-                    decode_responses=True
+                    decode_responses=True,
+                    socket_connect_timeout=5,
+                    socket_timeout=5
                 )
             else:
                 self.redis = aioredis.from_url(
                     self.redis_url,
                     encoding="utf-8", 
-                    decode_responses=True
+                    decode_responses=True,
+                    socket_connect_timeout=5,
+                    socket_timeout=5
                 )
             
-            # Test connection
-            await self.redis.ping()
+            # Test connection with timeout
+            await asyncio.wait_for(self.redis.ping(), timeout=5.0)
             self.connected = True
             logger.info("Redis rate limiter connected successfully")
             
+        except asyncio.TimeoutError:
+            logger.error("Redis connection timeout - rate limiting will fail closed in production")
+            self.connected = False
+            environment = os.getenv("ENVIRONMENT", "development")
+            if environment in ["production", "staging", "prod"]:
+                raise RuntimeError("Redis required for production - cannot start without rate limiting")
+            self._memory_cache = {}
         except Exception as e:
             logger.error(f"Failed to connect to Redis for rate limiting: {e}")
             self.connected = False
-            # Fallback to in-memory (not recommended for production)
+            environment = os.getenv("ENVIRONMENT", "development")
+            if environment in ["production", "staging", "prod"]:
+                raise RuntimeError(f"Redis required for production: {e}")
+            # Development only fallback
             self._memory_cache = {}
     
     async def check_rate_limit(
@@ -85,7 +99,33 @@ class RedisRateLimiter:
             Dict with rate limit status and metadata
         """
         if not self.connected:
-            return await self._check_memory_fallback(identifier, limit_type)
+            # In production, fail closed rather than permissive fallback
+            environment = os.getenv("ENVIRONMENT", "development")
+            if environment in ["production", "staging", "prod"]:
+                logger.error("Redis not available for rate limiting - denying request for safety")
+                return self._create_rate_limit_response(
+                    allowed=False,
+                    current_requests=0,
+                    limit=0,
+                    window=60,
+                    reset_time=time.time() + 60,
+                    error="Rate limiter unavailable - request denied for safety"
+                )
+            elif environment == "development":
+                # Development only: fallback to memory with strict warning
+                logger.warning("Redis not available - using in-memory fallback (DEVELOPMENT ONLY)")
+                return await self._check_memory_fallback(identifier, limit_type)
+            else:
+                # Unknown environment - fail closed for safety
+                logger.error(f"Unknown environment '{environment}' - denying request for safety")
+                return self._create_rate_limit_response(
+                    allowed=False,
+                    current_requests=0,
+                    limit=0,
+                    window=60,
+                    reset_time=time.time() + 60,
+                    error="Invalid environment configuration"
+                )
         
         # Get rate limit configuration
         if custom_limit:

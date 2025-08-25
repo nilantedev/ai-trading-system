@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from trading_common import get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_message_consumer, get_message_producer
+from trading_common.resilience import CircuitBreaker, CircuitBreakerConfig, RetryStrategy
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -164,11 +165,15 @@ class BrokerAPI(ABC):
 class AlpacaAPI(BrokerAPI):
     """Alpaca broker API implementation."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], circuit_breakers: Dict[str, CircuitBreaker] = None, retry_strategy: RetryStrategy = None):
         super().__init__(config)
         self.base_url = config.get('base_url', 'https://paper-api.alpaca.markets')
         self.api_key = config.get('api_key')
         self.secret_key = config.get('secret_key')
+        
+        # Resilience patterns
+        self.circuit_breakers = circuit_breakers or {}
+        self.retry_strategy = retry_strategy
         
     async def initialize(self):
         """Initialize Alpaca API."""
@@ -182,10 +187,12 @@ class AlpacaAPI(BrokerAPI):
             })
     
     async def get_account(self) -> Account:
-        """Get Alpaca account information."""
+        """Get Alpaca account information with circuit breaker protection."""
         await self._rate_limit()
         
-        try:
+        circuit_breaker = self.circuit_breakers.get('alpaca_api')
+        
+        async def make_request():
             async with self.session.get(f"{self.base_url}/v2/account") as response:
                 if response.status == 200:
                     data = await response.json()
@@ -205,7 +212,12 @@ class AlpacaAPI(BrokerAPI):
                     )
                 else:
                     raise Exception(f"Alpaca API error: {response.status}")
-                    
+        
+        try:
+            if circuit_breaker and self.retry_strategy:
+                return await circuit_breaker.call(self.retry_strategy.execute, make_request)
+            else:
+                return await make_request()
         except Exception as e:
             logger.error(f"Failed to get Alpaca account: {e}")
             raise
@@ -242,10 +254,12 @@ class AlpacaAPI(BrokerAPI):
             return []
     
     async def place_order(self, order: Order) -> Order:
-        """Place order with Alpaca."""
+        """Place order with Alpaca using circuit breaker protection."""
         await self._rate_limit()
         
-        try:
+        circuit_breaker = self.circuit_breakers.get('order_placement')
+        
+        async def make_request():
             order_data = {
                 'symbol': order.symbol,
                 'qty': str(order.quantity),
@@ -276,9 +290,14 @@ class AlpacaAPI(BrokerAPI):
                 else:
                     error_data = await response.json()
                     raise Exception(f"Alpaca order failed: {error_data}")
-                    
+        
+        try:
+            if circuit_breaker and self.retry_strategy:
+                return await circuit_breaker.call(self.retry_strategy.execute, make_request)
+            else:
+                return await make_request()
         except Exception as e:
-            logger.error(f"Failed to place Alpaca order: {e}")
+            logger.error(f"Failed to place Alpaca order with resilience: {e}")
             order.status = OrderStatus.REJECTED
             raise
     
@@ -373,7 +392,7 @@ class AlpacaAPI(BrokerAPI):
 class PaperTradingAPI(BrokerAPI):
     """Paper trading simulation API."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], circuit_breakers: Dict[str, CircuitBreaker] = None, retry_strategy: RetryStrategy = None):
         super().__init__(config)
         self.account_data = {
             'equity': 100000.0,
@@ -384,6 +403,10 @@ class PaperTradingAPI(BrokerAPI):
         self.positions = {}
         self.orders = {}
         self.order_counter = 1
+        
+        # Resilience patterns (not needed for paper trading but maintained for consistency)
+        self.circuit_breakers = circuit_breakers or {}
+        self.retry_strategy = retry_strategy
     
     async def get_account(self) -> Account:
         """Get paper trading account."""
@@ -520,6 +543,33 @@ class BrokerService:
         # Message queues
         self.order_queue = asyncio.Queue(maxsize=1000)
         
+        # Resilience patterns
+        self.circuit_breakers = {
+            'alpaca_api': CircuitBreaker(
+                name='alpaca_api',
+                config=CircuitBreakerConfig(
+                    failure_threshold=3,
+                    recovery_timeout=30,
+                    success_threshold=2
+                )
+            ),
+            'order_placement': CircuitBreaker(
+                name='order_placement', 
+                config=CircuitBreakerConfig(
+                    failure_threshold=5,
+                    recovery_timeout=60,
+                    success_threshold=3
+                )
+            )
+        }
+        
+        self.retry_strategy = RetryStrategy(
+            max_attempts=3,
+            base_delay=1.0,
+            max_delay=10.0,
+            exponential_base=2.0
+        )
+        
     async def start(self):
         """Initialize and start broker service."""
         logger.info("Starting Broker Integration Service")
@@ -579,9 +629,9 @@ class BrokerService:
                 broker_type = BrokerType(config.get('type', 'paper_trading'))
                 
                 if broker_type == BrokerType.ALPACA:
-                    broker = AlpacaAPI(config)
+                    broker = AlpacaAPI(config, self.circuit_breakers, self.retry_strategy)
                 elif broker_type == BrokerType.PAPER_TRADING:
-                    broker = PaperTradingAPI(config)
+                    broker = PaperTradingAPI(config, self.circuit_breakers, self.retry_strategy)
                 else:
                     logger.warning(f"Unsupported broker type: {broker_type}")
                     continue
