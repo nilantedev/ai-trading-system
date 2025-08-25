@@ -6,6 +6,7 @@ Combines GARCH for volatility modeling with LSTM for sequence prediction.
 
 import numpy as np
 import pandas as pd
+import os
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 import logging
@@ -36,9 +37,30 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
 
-from trading_common import MarketData, get_logger, get_metrics_registry
-from trading_common.ml_registry import get_model_registry, ModelMetadata, ModelType, ModelStatus
-from trading_common.metrics import track_model_metrics
+try:
+    from trading_common import get_logger, get_metrics_registry
+    from trading_common.models import MarketData
+    from trading_common.ml_registry import get_model_registry, ModelMetadata, ModelType, ModelStatus
+    from trading_common.metrics import track_model_metrics
+except ImportError as e:
+    # Fallback imports for testing
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Placeholder classes
+    class MarketData:
+        def __init__(self, timestamp=None, open=0, high=0, low=0, close=0, volume=0):
+            self.timestamp = timestamp
+            self.open = open
+            self.high = high
+            self.low = low
+            self.close = close
+            self.volume = volume
+    
+    def track_model_metrics(name):
+        def decorator(func):
+            return func
+        return decorator
 
 logger = get_logger(__name__)
 metrics = get_metrics_registry()

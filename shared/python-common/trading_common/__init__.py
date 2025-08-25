@@ -28,6 +28,26 @@ from .security_store import (
 # Import ML components
 from .feature_store import get_feature_store, FeatureVector, FeatureDefinition
 from .ml_pipeline import get_ml_pipeline, TrainingConfig, ModelMetrics
+from .ml_registry import get_model_registry, ModelMetadata, ModelType, ModelStatus
+
+# Import user management
+from .user_management import (
+    get_user_manager, User, UserRole, UserStatus, Session, PermissionManager,
+    create_default_admin_user, require_permission, require_role
+)
+
+# Import tracing
+from .tracing import (
+    get_tracing_manager, init_tracing, TracingConfig,
+    trace_function, trace_trading_operation, trace_data_ingestion,
+    trace_ml_operation, trace_risk_check, get_current_trace_id
+)
+
+# Import SLO monitoring
+from .slo_monitoring import (
+    get_slo_manager, SLOTarget, SLOType, AlertSeverity, Alert,
+    record_slo_metric, init_slo_monitoring
+)
 
 __version__ = "1.0.0-dev"
 __all__ = [
@@ -55,7 +75,44 @@ __all__ = [
     "log_security_event",
     "SecurityEventType",
     "PersistentSecurityStore",
-    "SecurityEvent",
+    "SecurityEvent", 
     "UserSession",
-    "RefreshToken"
+    "RefreshToken",
+    
+    # ML components
+    "get_model_registry",
+    "ModelMetadata", 
+    "ModelType",
+    "ModelStatus",
+    
+    # User management
+    "get_user_manager",
+    "User",
+    "UserRole", 
+    "UserStatus",
+    "Session",
+    "PermissionManager",
+    "create_default_admin_user",
+    "require_permission",
+    "require_role",
+    
+    # Tracing
+    "get_tracing_manager",
+    "init_tracing",
+    "TracingConfig",
+    "trace_function",
+    "trace_trading_operation",
+    "trace_data_ingestion", 
+    "trace_ml_operation",
+    "trace_risk_check",
+    "get_current_trace_id",
+    
+    # SLO monitoring
+    "get_slo_manager",
+    "SLOTarget",
+    "SLOType", 
+    "AlertSeverity",
+    "Alert",
+    "record_slo_metric",
+    "init_slo_monitoring"
 ]

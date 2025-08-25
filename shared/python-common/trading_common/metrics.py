@@ -190,6 +190,28 @@ class MetricsRegistry:
             registry=self.registry
         )
         
+        # WebSocket Metrics  
+        self.websocket_connections_active = Gauge(
+            'websocket_connections_active',
+            'Active WebSocket connections',
+            registry=self.registry
+        )
+        
+        self.websocket_broadcasts_total = Counter(
+            'websocket_broadcasts_total',
+            'Total WebSocket broadcasts sent',
+            ['message_type'],
+            registry=self.registry
+        )
+        
+        self.websocket_broadcast_latency_seconds = Histogram(
+            'websocket_broadcast_latency_seconds', 
+            'WebSocket broadcast latency in seconds',
+            ['message_type'],
+            registry=self.registry,
+            buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5)
+        )
+        
         logger.info("Prometheus metrics initialized")
     
     def _init_tracing(self):
@@ -322,6 +344,22 @@ class MetricsRegistry:
         # Memory usage
         memory = psutil.virtual_memory()
         self.system_memory_usage_bytes.set(memory.used)
+    
+    def record_websocket_broadcast(self, message_type: str, connection_count: int, latency: float):
+        """Record WebSocket broadcast metrics."""
+        if not PROMETHEUS_AVAILABLE:
+            return
+        
+        self.websocket_broadcasts_total.labels(message_type=message_type).inc()
+        self.websocket_broadcast_latency_seconds.labels(message_type=message_type).observe(latency)
+        self.websocket_connections_active.set(connection_count)
+    
+    def update_websocket_connections(self, count: int):
+        """Update active WebSocket connections count."""
+        if not PROMETHEUS_AVAILABLE:
+            return
+        
+        self.websocket_connections_active.set(count)
     
     @contextmanager
     def trace_span(self, name: str, attributes: Optional[Dict[str, Any]] = None):
