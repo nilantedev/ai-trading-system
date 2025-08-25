@@ -1,0 +1,147 @@
+# AI Trading System - Model Configuration
+# Defines local AI models for financial analysis and trading decisions
+
+models:
+  financial_analyzer:
+    name: "Qwen2.5-72B-Instruct"
+    model_family: "qwen2.5"
+    size: "72B"
+    memory_requirements:
+      minimum_gb: 45
+      recommended_gb: 50
+      quantization: "Q4_K_M"
+    serving:
+      backend: "ollama"
+      port: 11434
+      max_tokens: 8192
+      temperature: 0.1
+    capabilities:
+      - "financial_analysis"
+      - "market_trend_prediction"
+      - "earnings_analysis"
+      - "technical_indicators"
+    prompts:
+      system_prompt: |
+        You are a professional financial analyst with expertise in market analysis, 
+        technical indicators, and quantitative finance. Provide detailed, data-driven 
+        analysis with specific price targets and risk assessments.
+
+  sentiment_analyzer:
+    name: "FinBERT"
+    model_family: "bert"
+    size: "110M"
+    memory_requirements:
+      minimum_gb: 2
+      recommended_gb: 8
+      quantization: "fp16"
+    serving:
+      backend: "transformers"
+      port: 8080
+      batch_size: 32
+    capabilities:
+      - "financial_sentiment"
+      - "news_analysis"
+      - "social_media_sentiment"
+      - "earnings_call_analysis"
+    model_path: "ProsusAI/finbert"
+
+  risk_analyzer:
+    name: "DeepSeek-R1-70B"
+    model_family: "deepseek"
+    size: "70B"
+    memory_requirements:
+      minimum_gb: 42
+      recommended_gb: 48
+      quantization: "Q4_K_M"
+    serving:
+      backend: "ollama"
+      port: 11435
+      max_tokens: 4096
+      temperature: 0.05
+    capabilities:
+      - "risk_assessment"
+      - "portfolio_analysis"
+      - "var_calculation"
+      - "stress_testing"
+    prompts:
+      system_prompt: |
+        You are a quantitative risk analyst specializing in portfolio risk management, 
+        VaR calculations, and stress testing. Provide precise risk metrics and 
+        recommendations for position sizing.
+
+  strategy_generator:
+    name: "Llama-3.1-70B-Instruct"
+    model_family: "llama3.1"
+    size: "70B"
+    memory_requirements:
+      minimum_gb: 42
+      recommended_gb: 45
+      quantization: "Q4_K_M"
+    serving:
+      backend: "ollama"
+      port: 11436
+      max_tokens: 8192
+      temperature: 0.2
+    capabilities:
+      - "strategy_generation"
+      - "options_strategies"
+      - "portfolio_optimization"
+      - "trade_execution_planning"
+    prompts:
+      system_prompt: |
+        You are an expert quantitative trader specializing in algorithmic trading 
+        strategies, options trading, and portfolio optimization. Generate specific, 
+        actionable trading strategies with clear entry/exit rules.
+
+# Model deployment configuration
+deployment:
+  # Resource allocation
+  max_concurrent_models: 2
+  memory_buffer_gb: 20
+  cpu_cores_per_model: 8
+  
+  # Model loading priority (1 = highest)
+  loading_priority:
+    sentiment_analyzer: 1
+    financial_analyzer: 2
+    risk_analyzer: 3
+    strategy_generator: 4
+  
+  # Model serving configuration
+  health_check_interval: 30
+  model_timeout_seconds: 300
+  max_retries: 3
+  
+  # Development mode settings
+  development_mode: true
+  enable_model_switching: true
+  log_model_calls: true
+
+# Model download configuration (for production deployment)
+downloads:
+  base_path: "/mnt/fastdrive/trading/models"
+  huggingface_cache: "/mnt/bulkdata/trading/model-cache"
+  
+  models_to_download:
+    - model_id: "Qwen/Qwen2.5-72B-Instruct"
+      quantization: "Q4_K_M"
+      estimated_size_gb: 45
+    - model_id: "ProsusAI/finbert"
+      quantization: "fp16"
+      estimated_size_gb: 2
+    - model_id: "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
+      quantization: "Q4_K_M"
+      estimated_size_gb: 42
+    - model_id: "meta-llama/Meta-Llama-3.1-70B-Instruct"
+      quantization: "Q4_K_M"
+      estimated_size_gb: 42
+
+# Performance monitoring
+monitoring:
+  track_inference_time: true
+  track_memory_usage: true
+  track_gpu_utilization: true
+  alert_thresholds:
+    max_inference_time_ms: 5000
+    max_memory_usage_percent: 90
+    min_success_rate_percent: 95
