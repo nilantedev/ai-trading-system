@@ -65,7 +65,7 @@ tweepy>=4.14.0
 praw>=7.7.1
 newsapi-python>=0.2.7
 
-# Information theory and causality
-dit>=1.4.0
+# Information theory and causality (optional - can skip if compilation issues)
+# dit>=1.4.0
 jpype1>=1.4.1
 mutual-info>=0.3.1
