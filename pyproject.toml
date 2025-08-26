@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-trading-system"
-version = "1.0.0-dev"
-description = "Enterprise AI-powered options trading system"
+version = "3.0.0-production"
+description = "Enterprise AI-powered options trading system with compliance and disaster recovery"
 authors = [
     {name = "Nilante Dev", email = "admin@main-nilante.com"}
 ]
@@ -13,11 +13,14 @@ license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Framework :: FastAPI",
 ]
 dependencies = [
     "fastapi>=0.104.0",
