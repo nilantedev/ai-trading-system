@@ -8,7 +8,7 @@ set -euo pipefail
 
 # Configuration
 SERVER_HOST="${SERVER_HOST:-168.119.145.135}"
-SERVER_USER="${SERVER_USER:-root}"
+SERVER_USER="${SERVER_USER:-nilante}"
 DEPLOYMENT_PATH="${DEPLOYMENT_PATH:-/srv/trading}"
 LOCAL_PATH="$(pwd)"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
