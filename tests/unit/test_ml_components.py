@@ -264,8 +264,18 @@ class TestMLInfrastructure:
     def test_feature_store_models_exist(self):
         """Verify feature store models are properly defined."""
         assert FeatureDefinition is not None
-        assert hasattr(FeatureDefinition, 'name')
-        assert hasattr(FeatureDefinition, 'computation_logic')
+        
+        # Test creating an instance to verify fields exist
+        feature = FeatureDefinition(
+            name="test_feature",
+            description="Test feature",
+            feature_type="float",
+            source="test_source",
+            computation_logic="test_logic"
+        )
+        
+        assert feature.name == "test_feature"
+        assert feature.computation_logic == "test_logic"
     
     def test_training_config_validation(self):
         """Test training configuration validation."""

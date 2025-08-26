@@ -3,7 +3,7 @@
 WebSocket Manager - Real-time streaming for market data, signals, and system updates
 """
 
-from fastapi import WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, List, Set, Optional, Any
 import json
 import asyncio
@@ -37,6 +37,7 @@ class ConnectionManager:
     
     def __init__(self, enable_compression: bool = True, max_broadcast_rate: float = 100.0):
         # Active connections by stream type
+        self.start_time = datetime.utcnow()  # Added for accurate uptime tracking
         self.connections: Dict[str, Set[WebSocket]] = {
             "market_data": set(),
             "signals": set(),
@@ -299,18 +300,21 @@ class ConnectionManager:
         broadcast_time = end_time - start_time
         
         if metrics:
-            metrics.record_websocket_broadcast(
-                connections_count=len(connections),
-                successful_sends=successful_sends,
-                failed_sends=failed_sends,
-                broadcast_time=broadcast_time
-            )
+            try:
+                metrics.record_websocket_broadcast(
+                    connections_count=len(connections),
+                    successful_sends=successful_sends,
+                    failed_sends=failed_sends,
+                    broadcast_time=broadcast_time
+                )
+            except Exception as e:
+                logger.debug(f"Broadcast metrics recording failed: {e}")
         
         # Log performance information
         if len(connections) > 10:  # Only log for significant broadcasts
             logger.info(
                 f"WebSocket broadcast: {successful_sends}/{len(connections)} successful, "
-                f"{broadcast_time:.3f}s, {successful_sends/broadcast_time:.1f} msg/s"
+                f"{broadcast_time:.3f}s, { (successful_sends / broadcast_time) if broadcast_time else 0:.1f} msg/s"
             )
         
         self.connection_errors += failed_sends
@@ -492,7 +496,7 @@ class ConnectionManager:
             "symbol_subscriptions": len(self.symbol_subscriptions),
             "messages_sent": self.messages_sent,
             "connection_errors": self.connection_errors,
-            "uptime_seconds": (datetime.utcnow() - datetime.utcnow()).total_seconds()
+            "uptime_seconds": (datetime.utcnow() - self.start_time).total_seconds()  # Fixed uptime
         }
 
 
@@ -506,7 +510,7 @@ class WebSocketStreamer:
     def __init__(self, manager: ConnectionManager):
         self.manager = manager
         self.is_streaming = False
-        self.stream_tasks = []
+    self.stream_tasks: List[asyncio.Task] = []
         
     async def start_streaming(self):
         """Start all streaming tasks."""
@@ -710,18 +714,3 @@ class WebSocketStreamer:
             except Exception as e:
                 logger.error(f"System streaming error: {e}")
                 await asyncio.sleep(5)
-
-
-# Global streamer
-websocket_streamer = WebSocketStreamer(connection_manager)
-
-# WebSocket lifecycle management functions
-async def start_websocket_streaming():
-    """Start WebSocket streaming (called from FastAPI startup)."""
-    logger.info("Starting WebSocket streaming...")
-    return asyncio.create_task(websocket_streamer.start_streaming())
-
-async def stop_websocket_streaming():
-    """Stop WebSocket streaming (called from FastAPI shutdown)."""
-    logger.info("Stopping WebSocket streaming...")
-    await websocket_streamer.stop_streaming()

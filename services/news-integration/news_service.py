@@ -16,6 +16,10 @@ from abc import ABC, abstractmethod
 from trading_common import get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_message_consumer, get_message_producer
+from trading_common.resilience import (
+    CircuitBreaker, CircuitBreakerConfig, RetryStrategy, RetryConfig,
+    RateLimiter, BulkheadPool, get_circuit_breaker, with_retry, with_circuit_breaker
+)
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -100,24 +104,55 @@ class SentimentAnalysis:
 
 
 class NewsProviderAPI(ABC):
-    """Abstract base class for news provider APIs."""
+    """Abstract base class for news provider APIs with comprehensive resilience patterns."""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.session: Optional[aiohttp.ClientSession] = None
         self.api_key = config.get('api_key')
         self.base_url = config.get('base_url')
+        self.provider_name = config.get('provider_name', 'unknown')
         
-        # Rate limiting
-        self.rate_limit = asyncio.Semaphore(config.get('rate_limit', 10))
-        self.min_request_interval = config.get('min_request_interval', 1.0)
-        self.last_request_time = 0
+        # Initialize resilience components
+        self._init_resilience_patterns()
         
         # Status tracking
         self.request_count = 0
         self.error_count = 0
         self.last_success = None
         self.last_error = None
+    
+    def _init_resilience_patterns(self):
+        """Initialize comprehensive resilience patterns."""
+        # Circuit breaker configuration
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=self.config.get('failure_threshold', 3),
+            recovery_timeout=self.config.get('recovery_timeout', 60),
+            success_threshold=self.config.get('success_threshold', 2)
+        )
+        
+        # Get or create circuit breaker for this provider
+        self.circuit_breaker = get_circuit_breaker(
+            f"{self.provider_name}_news_api", cb_config
+        )
+        
+        # Retry strategy configuration
+        retry_config = RetryConfig(
+            max_attempts=self.config.get('max_attempts', 3),
+            initial_delay=self.config.get('initial_delay', 1.0),
+            max_delay=self.config.get('max_delay', 30.0),
+            exponential_base=self.config.get('exponential_base', 2.0),
+            jitter=True
+        )
+        self.retry_strategy = RetryStrategy(retry_config)
+        
+        # Rate limiter (token bucket)
+        rate_per_minute = self.config.get('rate_limit_per_minute', 60)
+        self.rate_limiter = RateLimiter(rate=rate_per_minute, per=60.0)
+        
+        # Bulkhead for concurrent request limiting
+        max_concurrent = self.config.get('max_concurrent_requests', 5)
+        self.bulkhead = BulkheadPool(max_concurrent)
     
     async def initialize(self):
         """Initialize the news provider connection."""
@@ -131,16 +166,86 @@ class NewsProviderAPI(ABC):
         if self.session:
             await self.session.close()
     
-    async def _rate_limit(self):
-        """Apply rate limiting."""
-        async with self.rate_limit:
-            current_time = time.time()
-            time_since_last = current_time - self.last_request_time
-            
-            if time_since_last < self.min_request_interval:
-                await asyncio.sleep(self.min_request_interval - time_since_last)
-            
-            self.last_request_time = time.time()
+    async def _make_resilient_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
+        """Make a resilient HTTP request with all fault tolerance patterns."""
+        # Apply rate limiting first
+        await self.rate_limiter.wait_and_acquire()
+        
+        # Define the actual HTTP call
+        async def make_http_call():
+            return await self._execute_http_request(method, url, **kwargs)
+        
+        # Execute with bulkhead protection
+        return await self.bulkhead.execute(
+            lambda: self.circuit_breaker.call(
+                lambda: self.retry_strategy.execute(make_http_call)
+            )
+        )
+    
+    async def _execute_http_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
+        """Execute the actual HTTP request."""
+        self.request_count += 1
+        start_time = time.time()
+        
+        try:
+            async with self.session.request(method, url, **kwargs) as response:
+                elapsed_time = time.time() - start_time
+                
+                # Log the request
+                logger.debug(
+                    f"{self.provider_name} API {method} {url} -> {response.status} in {elapsed_time:.3f}s"
+                )
+                
+                # Check for HTTP errors
+                if response.status >= 400:
+                    self.error_count += 1
+                    self.last_error = datetime.utcnow()
+                    
+                    if response.status >= 500:
+                        # Server errors are retryable
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                            message=f"Server error: {response.status}"
+                        )
+                    else:
+                        # Client errors (4xx) are not retryable in most cases
+                        error_text = await response.text()
+                        logger.warning(
+                            f"{self.provider_name} API client error {response.status}: {error_text}"
+                        )
+                        raise ValueError(f"Client error {response.status}: {error_text}")
+                
+                # Parse successful response
+                self.last_success = datetime.utcnow()
+                
+                if response.content_type == 'application/json':
+                    return await response.json()
+                else:
+                    return {'content': await response.text()}
+                    
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            self.error_count += 1 
+            self.last_error = datetime.utcnow()
+            elapsed_time = time.time() - start_time
+            logger.warning(
+                f"{self.provider_name} API {method} {url} failed: {e} (elapsed: {elapsed_time:.3f}s)"
+            )
+            raise
+    
+    def get_resilience_stats(self) -> Dict[str, Any]:
+        """Get resilience pattern statistics."""
+        return {
+            'provider': self.provider_name,
+            'requests_total': self.request_count,
+            'errors_total': self.error_count,
+            'last_success': self.last_success.isoformat() if self.last_success else None,
+            'last_error': self.last_error.isoformat() if self.last_error else None,
+            'circuit_breaker': self.circuit_breaker.get_state(),
+            'bulkhead': self.bulkhead.get_status(),
+            'rate_limiter_tokens': self.rate_limiter.tokens
+        }
     
     @abstractmethod
     async def get_news(self, request: NewsRequest) -> List[NewsArticle]:
@@ -154,18 +259,24 @@ class NewsProviderAPI(ABC):
 
 
 class NewsAPIProvider(NewsProviderAPI):
-    """NewsAPI.org provider implementation."""
+    """NewsAPI.org provider implementation with comprehensive resilience patterns."""
     
     def __init__(self, config: Dict[str, Any]):
-        config['base_url'] = 'https://newsapi.org/v2'
-        config['rate_limit'] = 1000  # 1000 requests per day
-        config['min_request_interval'] = 0.1
+        config.update({
+            'provider_name': 'newsapi',
+            'base_url': 'https://newsapi.org/v2',
+            'rate_limit_per_minute': 100,  # Conservative rate limiting
+            'max_concurrent_requests': 3,
+            'failure_threshold': 3,
+            'recovery_timeout': 120,  # 2 minutes for news APIs
+            'max_attempts': 2,  # News APIs can be sensitive to retries
+            'initial_delay': 2.0,
+            'max_delay': 30.0
+        })
         super().__init__(config)
     
     async def get_news(self, request: NewsRequest) -> List[NewsArticle]:
-        """Get news from NewsAPI."""
-        await self._rate_limit()
-        
+        """Get news from NewsAPI using resilient HTTP client."""
         try:
             # Build query string for symbols
             query_parts = []
@@ -191,6 +302,151 @@ class NewsAPIProvider(NewsProviderAPI):
                 params['from'] = request.start_date.strftime('%Y-%m-%d')
             if request.end_date:
                 params['to'] = request.end_date.strftime('%Y-%m-%d')
+            
+            # Make resilient API call
+            response_data = await self._make_resilient_request(
+                'GET',
+                f"{self.base_url}/everything",
+                params=params
+            )
+            
+            # Process response into NewsArticle objects
+            articles = []
+            for article_data in response_data.get('articles', []):
+                try:
+                    article = self._convert_to_news_article(article_data, request.symbols)
+                    if article:
+                        articles.append(article)
+                except Exception as e:
+                    logger.warning(f"Failed to parse article: {e}")
+                    continue
+            
+            logger.info(f"NewsAPI returned {len(articles)} articles for symbols {request.symbols}")
+            return articles
+            
+        except Exception as e:
+            logger.error(f"NewsAPI get_news failed: {e}")
+            return []  # Return empty list instead of raising to maintain service stability
+    
+    async def get_company_news(self, symbol: str, days: int = 7) -> List[NewsArticle]:
+        """Get company-specific news using resilient patterns."""
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=days)
+        
+        request = NewsRequest(
+            request_id=f"company_news_{symbol}_{int(time.time())}",
+            provider=NewsProvider.NEWSAPI,
+            symbols=[symbol],
+            start_date=start_date,
+            end_date=end_date,
+            limit=100
+        )
+        
+        return await self.get_news(request)
+    
+    def _convert_to_news_article(self, article_data: Dict[str, Any], symbols: List[str]) -> Optional[NewsArticle]:
+        """Convert NewsAPI response to NewsArticle object."""
+        try:
+            # Extract article fields
+            title = article_data.get('title', '')
+            description = article_data.get('description', '')
+            content = article_data.get('content', '')
+            url = article_data.get('url', '')
+            source = article_data.get('source', {}).get('name', 'Unknown')
+            author = article_data.get('author')
+            
+            # Parse published date
+            published_str = article_data.get('publishedAt', '')
+            try:
+                published_at = datetime.fromisoformat(published_str.replace('Z', '+00:00'))
+            except ValueError:
+                published_at = datetime.utcnow()
+            
+            # Basic sentiment analysis (placeholder - in real implementation you'd use NLP)
+            sentiment_score, sentiment_label = self._analyze_sentiment(title + ' ' + description)
+            
+            # Calculate relevance score based on symbol mentions
+            relevance_score = self._calculate_relevance(title + ' ' + description, symbols)
+            
+            # Generate article ID
+            article_id = f"newsapi_{hash(url)}_{int(published_at.timestamp())}"
+            
+            return NewsArticle(
+                article_id=article_id,
+                title=title,
+                description=description,
+                content=content,
+                url=url,
+                source=source,
+                author=author,
+                published_at=published_at,
+                symbols=symbols,
+                category=NewsCategory.GENERAL,  # Could be enhanced with categorization
+                sentiment_score=sentiment_score,
+                sentiment_label=sentiment_label,
+                relevance_score=relevance_score,
+                impact_score=0.5,  # Placeholder - could be ML-driven
+                provider=NewsProvider.NEWSAPI,
+                keywords=self._extract_keywords(title + ' ' + description)
+            )
+            
+        except Exception as e:
+            logger.warning(f"Failed to convert article: {e}")
+            return None
+    
+    def _analyze_sentiment(self, text: str) -> tuple[float, SentimentScore]:
+        """Basic sentiment analysis (placeholder implementation)."""
+        # In a real implementation, this would use NLP libraries like TextBlob, VADER, or ML models
+        text_lower = text.lower()
+        
+        positive_words = ['good', 'great', 'excellent', 'positive', 'up', 'rise', 'gain', 'profit', 'growth']
+        negative_words = ['bad', 'terrible', 'negative', 'down', 'fall', 'loss', 'decline', 'crash']
+        
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if positive_count > negative_count:
+            score = min(0.8, positive_count * 0.2)
+            label = SentimentScore.POSITIVE
+        elif negative_count > positive_count:
+            score = max(-0.8, -negative_count * 0.2)
+            label = SentimentScore.NEGATIVE
+        else:
+            score = 0.0
+            label = SentimentScore.NEUTRAL
+        
+        return score, label
+    
+    def _calculate_relevance(self, text: str, symbols: List[str]) -> float:
+        """Calculate relevance score based on symbol mentions."""
+        text_lower = text.lower()
+        mentions = 0
+        
+        for symbol in symbols:
+            symbol_variations = [symbol.lower(), f"${symbol.lower()}", symbol.lower() + " stock"]
+            mentions += sum(1 for variation in symbol_variations if variation in text_lower)
+        
+        return min(1.0, mentions * 0.3)
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Extract keywords from text (basic implementation)."""
+        # In a real implementation, this would use NLP techniques
+        import re
+        
+        # Simple keyword extraction based on common finance terms
+        finance_keywords = [
+            'earnings', 'revenue', 'profit', 'stock', 'share', 'market', 'trading',
+            'investment', 'merger', 'acquisition', 'ipo', 'dividend', 'quarter'
+        ]
+        
+        text_lower = text.lower()
+        found_keywords = [kw for kw in finance_keywords if kw in text_lower]
+        
+        # Extract potential company/stock symbols (simple regex)
+        symbols = re.findall(r'\b[A-Z]{2,5}\b', text)
+        found_keywords.extend(symbols[:5])  # Limit to 5 potential symbols
+        
+        return list(set(found_keywords))[:10]  # Return unique keywords, max 10
             
             # Use everything endpoint for general news
             url = f"{self.base_url}/everything"

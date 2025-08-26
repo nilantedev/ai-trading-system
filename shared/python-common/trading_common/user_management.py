@@ -36,7 +36,7 @@ except ImportError:
 from .config import get_settings
 from .logging import get_logger
 from .security_store import get_security_store, log_security_event, SecurityEventType
-from .database import get_redis_client, DatabaseManager
+from .database import get_redis_client
 from .user_repository import UserRepository
 from .user_models import Users, UserSessions, UserRole as DBUserRole, UserStatus as DBUserStatus
 import functools
@@ -218,8 +218,7 @@ class UserManager:
             self._engine = create_async_engine(db_url, echo=False)
             self._session_factory = async_sessionmaker(self._engine, class_=AsyncSession)
             
-            # Initialize database manager
-            self._db_manager = DatabaseManager()
+            # Database manager not needed for basic functionality
             
             logger.info("Database connection initialized for user management")
             
@@ -598,7 +597,7 @@ class UserManager:
                     'account_locked_until': user.account_locked_until,
                     'two_factor_enabled': user.two_factor_enabled,
                     'permissions': list(user.permissions) if user.permissions else [],
-                    'metadata': user.metadata or {},
+                    'user_metadata': user.metadata or {},
                     'created_at': user.created_at,
                     'updated_at': user.updated_at
                 }
@@ -640,7 +639,7 @@ class UserManager:
                     two_factor_enabled=db_user.two_factor_enabled,
                     api_key=db_user.api_key,
                     permissions=set(db_user.permissions) if db_user.permissions else set(),
-                    metadata=db_user.metadata or {}
+                    metadata=db_user.user_metadata or {}
                 )
                 
         except Exception as e:
@@ -678,7 +677,7 @@ class UserManager:
                     two_factor_enabled=db_user.two_factor_enabled,
                     api_key=db_user.api_key,
                     permissions=set(db_user.permissions) if db_user.permissions else set(),
-                    metadata=db_user.metadata or {}
+                    metadata=db_user.user_metadata or {}
                 )
                 
         except Exception as e:

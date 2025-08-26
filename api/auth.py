@@ -24,11 +24,13 @@ import asyncio
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from trading_common import get_settings, get_logger
+from trading_common import get_settings
+from shared.logging_config import get_logger
 from trading_common.security_store import (
     get_security_store, log_security_event, SecurityEventType,
     UserSession, RefreshToken
 )
+from trading_common.user_management import get_user_manager, UserRole as UserMgmtRole, UserStatus as UserMgmtStatus
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -52,33 +54,21 @@ if os.getenv("JWT_SECRET_KEY") and os.getenv("JWT_SECRET_KEY") != settings.secur
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 # Production validation
-if settings.environment == "production" and JWT_SECRET_KEY == "dev-secret-change-in-production":
-    logger.error("CRITICAL: Default secret key detected in production! Set SECURITY_SECRET_KEY immediately.")
+if settings.is_production and len(JWT_SECRET_KEY) < 32:
+    logger.error("CRITICAL: JWT secret key must be at least 32 characters in production!")
     raise ValueError("Production deployment requires secure secret key")
 
-# Admin configuration
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")  # Pre-hashed bcrypt password
-
-# Enforce password hash requirement in non-development environments
-if not ADMIN_PASSWORD_HASH:
-    if settings.environment != "development":
-        logger.critical("ADMIN_PASSWORD_HASH must be set in non-development environments!")
-        raise ValueError("Security Error: ADMIN_PASSWORD_HASH is required for this environment")
-    else:
-        # Development only: generate hash from ADMIN_PASSWORD env var
-        dev_password = os.getenv("ADMIN_PASSWORD")
-        if not dev_password:
-            logger.critical("Either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD must be set")
-            raise ValueError("Security Error: Admin credentials not configured")
-        ADMIN_PASSWORD_HASH = pwd_context.hash(dev_password)
-        logger.warning("Development mode: Using ADMIN_PASSWORD env var (not for production)")
+# Initialize user manager for persistent authentication
+user_manager = get_user_manager()
 
 
 class UserRole(str, Enum):
     """User roles for permission management."""
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     TRADER = "trader"
+    ANALYST = "analyst"
+    API_USER = "api_user"
     VIEWER = "viewer"
 
 
@@ -86,10 +76,12 @@ class User(BaseModel):
     """User model with permissions."""
     user_id: str
     username: str
-    roles: List[UserRole]
+    email: str
+    role: UserRole
     permissions: List[str]
     is_active: bool = True
     created_at: datetime
+    updated_at: datetime
     last_login: Optional[datetime] = None
 
 
@@ -97,7 +89,7 @@ class TokenData(BaseModel):
     """JWT token payload data."""
     user_id: str
     username: str
-    roles: List[str]
+    role: str
     permissions: List[str]
     exp: datetime
     iat: datetime
@@ -109,26 +101,8 @@ class TokenData(BaseModel):
 # Token storage now handled by persistent security store
 # revoked_tokens and refresh_tokens replaced with Redis-backed store
 
-# Predefined users (in production, use database)
-SYSTEM_USERS = {
-    ADMIN_USERNAME: {
-        "user_id": "admin_001",
-        "username": ADMIN_USERNAME,
-        "password_hash": ADMIN_PASSWORD_HASH,
-        "roles": [UserRole.ADMIN],
-        "permissions": [
-            "read:market_data",
-            "write:orders",
-            "read:portfolio", 
-            "write:portfolio",
-            "read:system",
-            "write:system",
-            "admin:all"
-        ],
-        "is_active": True,
-        "created_at": datetime.utcnow()
-    }
-}
+# User authentication now handled by persistent user management system
+# No more in-memory SYSTEM_USERS dictionary
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -206,31 +180,32 @@ async def record_successful_login(username: str, ip_address: Optional[str] = Non
         logger.error(f"Error recording successful login attempt: {e}")
 
 async def authenticate_user(username: str, password: str, ip_address: Optional[str] = None) -> Optional[User]:
-    """Authenticate user with username and password using persistent security store."""
-    # Check brute force protection
-    if await check_brute_force(username):
+    """Authenticate user with username and password using persistent user management."""
+    try:
+        # Use the user manager for authentication
+        user_mgmt_user = await user_manager.authenticate_user(username, password, ip_address)
+        
+        if not user_mgmt_user:
+            return None
+        
+        # Convert user management User to API User model
+        api_user = User(
+            user_id=user_mgmt_user.user_id,
+            username=user_mgmt_user.username,
+            email=user_mgmt_user.email,
+            role=UserRole(user_mgmt_user.role.value),
+            permissions=list(user_mgmt_user.permissions),
+            is_active=user_mgmt_user.status.value == "active",
+            created_at=user_mgmt_user.created_at,
+            updated_at=user_mgmt_user.updated_at,
+            last_login=user_mgmt_user.last_login
+        )
+        
+        return api_user
+        
+    except Exception as e:
+        logger.error(f"Authentication error for user {username}: {e}")
         return None
-    
-    user_data = SYSTEM_USERS.get(username)
-    if not user_data:
-        await record_failed_login(username, ip_address)
-        return None
-    
-    if not verify_password(password, user_data["password_hash"]):
-        await record_failed_login(username, ip_address)
-        return None
-    
-    if not user_data["is_active"]:
-        await record_failed_login(username, ip_address)
-        return None
-    
-    # Record successful login (clears failed attempts automatically)
-    await record_successful_login(username, ip_address)
-    
-    # Update last login
-    user_data["last_login"] = datetime.utcnow()
-    
-    return User(**{k: v for k, v in user_data.items() if k != "password_hash"})
 
 
 def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
@@ -243,18 +218,23 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
     # Add unique token ID for revocation
     token_id = secrets.token_urlsafe(32)
     
-    token_data = TokenData(
-        user_id=user.user_id,
-        username=user.username,
-        roles=user.roles,
-        permissions=user.permissions,
-        exp=expire,
-        iat=datetime.utcnow(),
-        jti=token_id  # JWT ID for revocation
-    )
+    iat_time = datetime.utcnow()
+    
+    # Create payload with Unix timestamps for exp and iat
+    payload = {
+        "user_id": user.user_id,
+        "username": user.username, 
+        "role": user.role.value,
+        "permissions": user.permissions,
+        "exp": int(expire.timestamp()),  # Convert to Unix timestamp
+        "iat": int(iat_time.timestamp()),  # Convert to Unix timestamp
+        "iss": "ai-trading-system",
+        "aud": "trading-api",
+        "jti": token_id
+    }
     
     return jwt.encode(
-        token_data.model_dump(),
+        payload,
         JWT_SECRET_KEY,
         algorithm=JWT_ALGORITHM
     )
@@ -281,44 +261,66 @@ async def store_refresh_token(user: User) -> str:
 
 async def refresh_access_token(refresh_token: str) -> Optional[Tuple[str, str]]:
     """Refresh access token using persistent store."""
-    security_store = await get_security_store()
-    token_data = await security_store.get_refresh_token(refresh_token)
-    
-    if not token_data or token_data.is_revoked:
+    try:
+        security_store = await get_security_store()
+        token_data = await security_store.get_refresh_token(refresh_token)
+        
+        if not token_data or token_data.is_revoked:
+            return None
+        
+        # Check if token is expired
+        if token_data.expires_at < datetime.utcnow():
+            return None
+        
+        # Get user from user manager
+        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
+        if not user_mgmt_user or user_mgmt_user.status.value != "active":
+            return None
+        
+        # Convert to API User model
+        api_user = User(
+            user_id=user_mgmt_user.user_id,
+            username=user_mgmt_user.username,
+            email=user_mgmt_user.email,
+            role=UserRole(user_mgmt_user.role.value),
+            permissions=list(user_mgmt_user.permissions),
+            is_active=True,
+            created_at=user_mgmt_user.created_at,
+            updated_at=user_mgmt_user.updated_at,
+            last_login=user_mgmt_user.last_login
+        )
+        
+        # Create new access token
+        new_access_token = create_access_token(api_user)
+        
+        # Rotate refresh token (remove old, create new)
+        await security_store.revoke_refresh_token(refresh_token)
+        new_refresh_token = await store_refresh_token(api_user)
+        
+        # Log security event
+        await log_security_event(
+            event_type=SecurityEventType.TOKEN_REFRESH,
+            success=True,
+            user_id=api_user.user_id,
+            username=api_user.username
+        )
+        
+        return new_access_token, new_refresh_token
+        
+    except Exception as e:
+        logger.error(f"Error refreshing token: {e}")
         return None
-    
-    # Check if token is expired
-    if token_data.expires_at < datetime.utcnow():
-        return None
-    
-    # Get user
-    user_data = SYSTEM_USERS.get(token_data.username)
-    if not user_data or not user_data["is_active"]:
-        return None
-    
-    user = User(**{k: v for k, v in user_data.items() if k != "password_hash"})
-    
-    # Create new access token
-    new_access_token = create_access_token(user)
-    
-    # Rotate refresh token (remove old, create new)
-    await security_store.revoke_refresh_token(refresh_token)
-    new_refresh_token = await store_refresh_token(user)
-    
-    # Log security event
-    await log_security_event(
-        event_type=SecurityEventType.TOKEN_REFRESH,
-        success=True,
-        user_id=user.user_id,
-        username=user.username
-    )
-    
-    return new_access_token, new_refresh_token
 
 async def revoke_token(token: str):
     """Revoke an access token using persistent store."""
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(
+            token, 
+            JWT_SECRET_KEY, 
+            algorithms=[JWT_ALGORITHM],
+            audience="trading-api",
+            issuer="ai-trading-system"
+        )
         jti = payload.get("jti")
         exp = payload.get("exp")
         
@@ -344,7 +346,13 @@ async def revoke_token(token: str):
 async def verify_access_token(token: str) -> TokenData:
     """Verify and decode JWT access token using persistent store."""
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(
+            token, 
+            JWT_SECRET_KEY, 
+            algorithms=[JWT_ALGORITHM],
+            audience="trading-api",
+            issuer="ai-trading-system"
+        )
         
         # Check if token is revoked using persistent store
         jti = payload.get("jti")
@@ -366,13 +374,18 @@ async def verify_access_token(token: str) -> TokenData:
                 detail="Invalid token payload"
             )
         
-        # Check expiry
+        # Check expiry - exp is in seconds since epoch
         exp = payload.get("exp")
-        if exp and datetime.fromtimestamp(exp) < datetime.utcnow():
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token expired"
-            )
+        if exp:
+            # Convert exp to datetime for comparison
+            exp_datetime = datetime.fromtimestamp(exp)
+            current_time = datetime.utcnow()
+            if exp_datetime < current_time:
+                logger.debug(f"Token expired: exp={exp_datetime}, current={current_time}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token expired"
+                )
         
         # Validate issuer/audience
         iss = payload.get("iss", "")
@@ -395,17 +408,40 @@ async def verify_access_token(token: str) -> TokenData:
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
     """Get current authenticated user from JWT token."""
-    token_data = await verify_access_token(credentials.credentials)
-    
-    # Get user from system users
-    user_data = SYSTEM_USERS.get(token_data.username)
-    if not user_data or not user_data["is_active"]:
+    try:
+        token_data = await verify_access_token(credentials.credentials)
+        
+        # Get user from user manager
+        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
+        if not user_mgmt_user or user_mgmt_user.status.value != "active":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or inactive"
+            )
+        
+        # Convert to API User model
+        api_user = User(
+            user_id=user_mgmt_user.user_id,
+            username=user_mgmt_user.username,
+            email=user_mgmt_user.email,
+            role=UserRole(user_mgmt_user.role.value),
+            permissions=list(user_mgmt_user.permissions),
+            is_active=True,
+            created_at=user_mgmt_user.created_at,
+            updated_at=user_mgmt_user.updated_at,
+            last_login=user_mgmt_user.last_login
+        )
+        
+        return api_user
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting current user: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive"
+            detail="Authentication failed"
         )
-    
-    return User(**{k: v for k, v in user_data.items() if k != "password_hash"})
 
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
@@ -426,13 +462,27 @@ async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] 
     try:
         token_data = await verify_access_token(credentials.credentials)
         
-        # Get user from system users
-        user_data = SYSTEM_USERS.get(token_data.username)
-        if not user_data or not user_data["is_active"]:
+        # Get user from user manager
+        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
+        if not user_mgmt_user or user_mgmt_user.status.value != "active":
             return None
         
-        return User(**{k: v for k, v in user_data.items() if k != "password_hash"})
-    except (JWTError, HTTPException, ValueError):
+        # Convert to API User model
+        api_user = User(
+            user_id=user_mgmt_user.user_id,
+            username=user_mgmt_user.username,
+            email=user_mgmt_user.email,
+            role=UserRole(user_mgmt_user.role.value),
+            permissions=list(user_mgmt_user.permissions),
+            is_active=True,
+            created_at=user_mgmt_user.created_at,
+            updated_at=user_mgmt_user.updated_at,
+            last_login=user_mgmt_user.last_login
+        )
+        
+        return api_user
+        
+    except (JWTError, HTTPException, ValueError, Exception):
         return None
 
 
@@ -451,10 +501,15 @@ def require_permission(permission: str):
 def require_role(role: UserRole):
     """Dependency to require specific role."""
     async def role_checker(current_user: User = Depends(get_current_active_user)):
-        if role not in current_user.roles and UserRole.ADMIN not in current_user.roles:
+        # Allow super admin and admin to access everything
+        if current_user.role in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+            return current_user
+        
+        # Check specific role match
+        if current_user.role != role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required role: {role}"
+                detail=f"Insufficient permissions. Required role: {role}, current: {current_user.role}"
             )
         return current_user
     return role_checker
@@ -463,13 +518,23 @@ def require_role(role: UserRole):
 
 
 # Health check for auth system
-def get_auth_health() -> Dict[str, Any]:
+async def get_auth_health() -> Dict[str, Any]:
     """Get authentication system health status."""
-    return {
-        "status": "healthy",
-        "jwt_configured": bool(JWT_SECRET_KEY),
-        "admin_configured": ADMIN_USERNAME in SYSTEM_USERS,
-        "total_users": len(SYSTEM_USERS),
-        "active_users": sum(1 for u in SYSTEM_USERS.values() if u["is_active"]),
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    try:
+        # Check user manager availability
+        user_manager_available = user_manager is not None and user_manager._session_factory is not None
+        
+        return {
+            "status": "healthy",
+            "jwt_configured": bool(JWT_SECRET_KEY and len(JWT_SECRET_KEY) >= 16),
+            "user_manager_available": user_manager_available,
+            "database_connected": user_manager_available,
+            "settings_loaded": settings is not None,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }

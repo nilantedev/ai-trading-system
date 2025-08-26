@@ -346,6 +346,16 @@ async def create_rate_limit_middleware():
         # Check rate limit
         result = await limiter.check_rate_limit(identifier, limit_type)
         
+        # Metrics integration (best-effort; metrics module may not be available early)
+        try:
+            from api.metrics import metrics
+            metrics.record_rate_limit_check(limit_type, result["allowed"], identifier_type='user' if user else 'ip')
+            if not result["allowed"]:
+                from api.metrics import metrics as _m
+                from api.metrics import rate_limit_blocks_total  # noqa: F401 (ensures import side effects)
+        except Exception:
+            pass
+
         if not result["allowed"]:
             # Add rate limit headers
             headers = {

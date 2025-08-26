@@ -121,6 +121,28 @@ websocket_errors_total = Counter(
     registry=registry
 )
 
+# WebSocket Broadcast Metrics
+websocket_broadcast_total = Counter(
+    'websocket_broadcast_total',
+    'Total number of WebSocket broadcast operations',
+    ['result'],
+    registry=registry
+)
+
+websocket_broadcast_messages = Histogram(
+    'websocket_broadcast_messages',
+    'Number of messages (fanout recipients) per broadcast',
+    buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000],
+    registry=registry
+)
+
+websocket_broadcast_duration_seconds = Histogram(
+    'websocket_broadcast_duration_seconds',
+    'Duration of WebSocket broadcast operations in seconds',
+    buckets=[0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+    registry=registry
+)
+
 # Trading System Metrics
 market_data_points_total = Counter(
     'market_data_points_total',
@@ -255,13 +277,26 @@ class MetricsCollector:
             endpoint=endpoint
         ).observe(duration)
         
-        # Record request size if available
-        if hasattr(request, '_body'):
-            request_size = len(request._body) if request._body else 0
-            http_request_size_bytes.labels(
-                method=method,
-                endpoint=endpoint
-            ).observe(request_size)
+        # Record request size (avoid using protected _body attribute)
+        try:
+            # Prefer Content-Length header if provided
+            cl = request.headers.get('content-length')
+            if cl is not None:
+                request_size = int(cl)
+            else:
+                # Fallback: read body once (only for reasonably small payloads)
+                # NOTE: Reading the body will consume the stream; in most FastAPI usage the body
+                # is already read by downstream (e.g., JSON parsing). We defensively limit.
+                BODY_INSPECTION_LIMIT = 64 * 1024  # 64KB safeguard
+                body = await request.body()
+                if len(body) > BODY_INSPECTION_LIMIT:
+                    request_size = BODY_INSPECTION_LIMIT
+                else:
+                    request_size = len(body)
+            http_request_size_bytes.labels(method=method, endpoint=endpoint).observe(request_size)
+        except Exception:
+            # Swallow any issues calculating size to avoid impacting request flow
+            pass
         
         # Record response size
         content_length = response.headers.get('content-length')
@@ -316,6 +351,15 @@ class MetricsCollector:
             stream_type=stream_type,
             error_type=error_type
         ).inc()
+
+    # --- WebSocket Broadcast ---
+    def record_websocket_broadcast(self, connections_count: int, successful_sends: int, failed_sends: int, broadcast_time: float):
+        """Record a broadcast fanout event."""
+        result = 'success' if failed_sends == 0 else ('partial' if successful_sends > 0 else 'failed')
+        websocket_broadcast_total.labels(result=result).inc()
+        websocket_broadcast_messages.observe(connections_count)
+        websocket_broadcast_duration_seconds.observe(broadcast_time)
+        # Additional derived gauges could be added later (success ratio, etc.)
     
     def record_market_data(self, symbol: str, source: str):
         """Record market data point processed."""

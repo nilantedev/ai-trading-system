@@ -4,13 +4,10 @@ AI Trading System API - Main FastAPI Application (FIXED VERSION)
 Consolidated startup/shutdown events and proper middleware ordering.
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, status
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.security import HTTPBearer
 from fastapi.responses import JSONResponse
-import uvicorn
-import logging
 import time
 import os
 import uuid
@@ -22,10 +19,16 @@ import sys
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from trading_common import get_settings, get_logger
-from trading_common.resilience import get_all_circuit_breakers
+from trading_common import get_settings  # type: ignore[import-not-found]
+from shared.logging_config import configure_logging, get_logger, correlation_id_var
+from trading_common.resilience import get_all_circuit_breakers  # type: ignore[import-not-found]
 
-# Initialize logging
+# Common tuple of transient/expected infrastructure errors we tolerate during
+# phased startup/shutdown without treating them as fatal in non-prod envs.
+TRANSIENT_ERRORS = (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)
+
+# Initialize structured logging (configure once)
+configure_logging()
 logger = get_logger(__name__)
 settings = get_settings()
 
@@ -34,7 +37,7 @@ try:
     settings.enforce_production_security()
     logger.info("Configuration validation passed")
 except ValueError as e:
-    logger.error(f"Configuration validation failed: {e}")
+    logger.error("Configuration validation failed", error=str(e))
     if settings.is_production:
         raise
 
@@ -153,19 +156,9 @@ async def logging_middleware(request: Request, call_next):
     
     # Generate correlation ID for request tracking
     correlation_id = str(uuid.uuid4())[:8]
-    
-    # Store in request state
+    token = correlation_id_var.set(correlation_id)
     request.state.correlation_id = correlation_id
-    
-    # Log request with correlation ID
-    logger.info(
-        f"[{correlation_id}] API Request: {request.method} {request.url}",
-        extra={
-            "correlation_id": correlation_id, 
-            "method": request.method, 
-            "url": str(request.url)
-        }
-    )
+    logger.info("API Request", method=request.method, url=str(request.url))
     
     # Process request
     response = await call_next(request)
@@ -174,24 +167,18 @@ async def logging_middleware(request: Request, call_next):
     duration = time.time() - start_time
     
     # Log response with correlation ID
-    logger.info(
-        f"[{correlation_id}] API Response: {response.status_code} "
-        f"({duration:.3f}s) {request.method} {request.url}",
-        extra={
-            "correlation_id": correlation_id,
-            "status_code": response.status_code,
-            "duration_ms": int(duration * 1000),
-            "method": request.method,
-            "url": str(request.url)
-        }
-    )
+    logger.info("API Response", status_code=response.status_code, duration_ms=int(duration*1000), method=request.method, url=str(request.url))
     
     # Add response headers
     response.headers["X-Response-Time"] = f"{duration:.3f}s"
     response.headers["X-API-Version"] = "1.0.0"
     response.headers["X-Correlation-ID"] = correlation_id
     
-    return response
+    try:
+        return response
+    finally:
+        # Reset correlation id contextvar
+        correlation_id_var.reset(token)
 
 
 # ==========================================
@@ -202,45 +189,50 @@ async def logging_middleware(request: Request, call_next):
 async def consolidated_startup():
     """Initialize services with proper ordering and error handling."""
     app.state.start_time = time.time()
-    logger.info("🚀 AI Trading System API starting up...")
+    logger.info("API starting up", phase="startup", emoji="🚀")
     
     # PHASE 1: Security validation FIRST - fail fast on security issues
     try:
-        logger.info("Phase 1: Security validation")
+        logger.info("Security validation phase", phase=1)
         from trading_common.security_validator import validate_deployment_security
         environment = settings.environment
         
         if not validate_deployment_security(environment):
-            logger.critical("❌ Security validation failed - cannot start application")
+            logger.critical("Security validation failed - cannot start application", phase=1, result="fail")
             raise SystemExit(1)
-        
-        logger.info(f"✅ Security validation passed for {environment} environment")
+
+        logger.info("Security validation passed", phase=1, environment=environment, result="success")
     except ImportError:
-        logger.warning("⚠️ Security validator not found - skipping validation")
-    except SystemExit:
-        raise  # Re-raise to actually exit
-    except Exception as e:
-        logger.critical(f"❌ Security validation error: {e}")
+        logger.warning("Security validator not found - skipping validation", phase=1, skipped=True)
+    except Exception as e:  # noqa: BLE001 - Security validation may raise diverse runtime errors; we fail fast except in dev
+        logger.critical("Security validation error", error=str(e), phase=1)
         if settings.environment != "development":
-            raise SystemExit(1)
+            raise SystemExit(1) from e
     
     # PHASE 2: Initialize persistent security store
     try:
-        logger.info("Phase 2: Initializing persistent security store")
+        logger.info("Initializing persistent security store", phase=2)
         from trading_common.security_store import get_security_store
         await get_security_store()
-        logger.info("✅ Persistent security store initialized")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize security store: {e}")
+        logger.info("Persistent security store initialized", phase=2, result="success")
+    except ImportError as e:
+        logger.warning("Security store module missing", error=str(e), phase=2, skipped=True)
+    except TRANSIENT_ERRORS as e:
+        logger.error("Transient error initializing security store", error=str(e), phase=2)
         if settings.environment in ["production", "staging"]:
-            raise  # Required in production
-        logger.warning("⚠️ Continuing without persistent security store in development")
+            raise
+        logger.warning("Continuing without persistent security store in development", phase=2, degraded=True)
+    except Exception as e:  # noqa: BLE001 - Unexpected; continue in dev, raise in prod/staging
+        logger.error("Unexpected error initializing security store", error=str(e), phase=2)
+        if settings.environment in ["production", "staging"]:
+            raise
+        logger.warning("Continuing after unexpected security store error in development", phase=2, degraded=True)
     
     # PHASE 3: Initialize middleware in correct order
     # NOTE: Middleware added via decorators is applied in REVERSE order
     # So we add: Metrics -> Rate Limiting -> Auth (will be applied as Auth -> Rate -> Metrics)
     try:
-        logger.info("Phase 3: Initializing middleware stack")
+        logger.info("Initializing middleware stack", phase=3)
         
         # Add metrics middleware (applied last)
         try:
@@ -251,53 +243,59 @@ async def consolidated_startup():
             # Add metrics endpoint
             metrics_handler = get_metrics_handler()
             app.get("/metrics")(metrics_handler)
-            logger.info("✅ Prometheus metrics middleware initialized")
+            logger.info("Prometheus metrics middleware initialized", phase=3, component="metrics", result="success")
         except ImportError:
-            logger.warning("⚠️ Metrics module not found - continuing without metrics")
+            logger.warning("Metrics module not found - continuing without metrics", phase=3, component="metrics", skipped=True)
         
         # Add rate limiting middleware (applied second)
         from api.rate_limiter import create_rate_limit_middleware
         rate_limiter_middleware = await create_rate_limit_middleware()
         app.middleware("http")(rate_limiter_middleware)
-        logger.info("✅ Rate limiting middleware initialized")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize middleware: {e}")
+        logger.info("Rate limiting middleware initialized", phase=3, component="rate_limiter", result="success")
+
+    except Exception as e:  # noqa: BLE001 - Middleware init failure grouped; allow partial startup in dev
+        logger.error("Failed to initialize middleware", error=str(e), phase=3)
         if settings.environment in ["production", "staging"]:
             raise
-        logger.warning("⚠️ Continuing with limited middleware in development")
+        logger.warning("Continuing with limited middleware in development", phase=3, degraded=True)
     
     # PHASE 4: Initialize WebSocket streaming
     try:
-        logger.info("Phase 4: Initializing WebSocket streaming")
+        logger.info("Initializing WebSocket streaming", phase=4)
         from api.websocket_manager import start_websocket_streaming
         app.state.websocket_task = await start_websocket_streaming()
-        logger.info("✅ WebSocket streaming initialized")
+        logger.info("WebSocket streaming initialized", phase=4, result="success")
     except ImportError:
-        logger.warning("⚠️ WebSocket manager not found - continuing without WebSocket")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize WebSocket streaming: {e}")
+        logger.warning("WebSocket manager not found - continuing without WebSocket", phase=4, skipped=True)
+    except TRANSIENT_ERRORS as e:
+        logger.error("Transient WebSocket streaming init error", error=str(e), phase=4)
+        if settings.environment == "production":
+            logger.warning("WebSocket streaming transient failure - proceeding")
+    except Exception as e:  # noqa: BLE001 - Unexpected streaming init error; non-fatal
+        logger.error("Unexpected WebSocket streaming init error", error=str(e), phase=4)
         if settings.environment == "production":
             logger.warning("WebSocket streaming failed but not blocking production start")
     
     # PHASE 5: Initialize core trading services (lazy loading) + ML wiring
     try:
-        logger.info("Phase 5: Preparing trading system services (lazy loading)")
+        logger.info("Preparing trading system services (lazy loading)", phase=5)
         # Services will be initialized on first request to avoid startup delays
         # This is a lazy loading approach for better startup performance
-        logger.info("✅ Trading services ready for lazy initialization")
+        logger.info("Trading services ready for lazy initialization", phase=5, result="pending_lazy")
         # Start drift monitoring background task & register production models
         try:
-            from trading_common.drift_scheduler import start_drift_monitor
-            from trading_common.model_registry import get_model_registry, ModelState
+            from trading_common.drift_scheduler import start_drift_monitor  # type: ignore[import-not-found]
+            from trading_common.model_registry import get_model_registry  # type: ignore[import-not-found]
             registry = await get_model_registry()
             rows = await registry.db.fetch_all("SELECT model_name, version FROM model_registry WHERE state='PRODUCTION'")
             models = [(r['model_name'], r['version']) for r in rows]
             interval = int(os.getenv('DRIFT_INTERVAL_SECONDS', '3600'))
             app.state.drift_task = await start_drift_monitor(interval_seconds=interval, models=models)
-            logger.info("📈 Drift monitor started (models=%d interval=%ds)", len(models), interval)
-        except Exception as e:
-            logger.warning(f"Drift monitor not started: {e}")
+            logger.info("Drift monitor started", phase=5, models=len(models), interval_seconds=interval)
+        except TRANSIENT_ERRORS as e:
+            logger.warning("Transient drift monitor start issue", error=str(e), phase=5, degraded=True)
+        except Exception as e:  # noqa: BLE001 - Drift monitor optional; unexpected error tolerated
+            logger.warning("Drift monitor not started due to unexpected error", error=str(e), phase=5, degraded=True)
 
         # Register default feature view if missing
         try:
@@ -309,9 +307,11 @@ async def consolidated_startup():
                 core_features = ['sma_20', 'rsi_14']  # minimal set; extend later
                 await store.register_feature_view(default_view, core_features, description='Core technical indicators v1')
                 await store.materialize_feature_view(default_view, entity_ids=['AAPL','MSFT','GOOGL'], as_of=datetime.utcnow())
-                logger.info("🧱 Registered default feature view '%s' with %d features", default_view, len(core_features))
-        except Exception as e:
-            logger.warning(f"Feature view registration skipped: {e}")
+                logger.info("Registered default feature view", feature_view=default_view, feature_count=len(core_features), phase=5)
+        except TRANSIENT_ERRORS as e:
+            logger.warning("Transient issue registering feature view", error=str(e), phase=5)
+        except Exception as e:  # noqa: BLE001 - Non-fatal feature registration problem
+            logger.warning("Feature view registration skipped", error=str(e), phase=5)
 
         # Log startup banner summary
         try:
@@ -320,14 +320,16 @@ async def consolidated_startup():
             feature_count = len(store.feature_definitions)
             fv_count_row = await store.db.fetch_one("SELECT COUNT(*) AS c FROM feature_views")
             fv_count = fv_count_row['c'] if fv_count_row else 0
-            logger.info("🔧 Startup ML Summary: features=%d feature_views=%d drift_monitor=%s experiment_tracking=enabled", feature_count, fv_count, 'on' if hasattr(app.state,'drift_task') else 'off')
-        except Exception as e:
-            logger.debug(f"Startup ML summary logging failed: {e}")
-    except Exception as e:
-        logger.error(f"Service initialization setup failed: {e}")
+            logger.info("Startup ML Summary", features=feature_count, feature_views=fv_count, drift_monitor=('on' if hasattr(app.state,'drift_task') else 'off'), experiment_tracking="enabled", phase=5)
+        except TRANSIENT_ERRORS as e:
+            logger.debug("Startup ML summary logging transient issue", error=str(e), phase=5)
+        except Exception as e:  # noqa: BLE001 - Summary logging failure is non-critical
+            logger.debug("Startup ML summary logging failed", error=str(e), phase=5)
+    except Exception as e:  # noqa: BLE001 - Final phase grouping to ensure startup proceeds when safe
+        logger.error("Service initialization setup failed", error=str(e), phase=5)
     
     startup_duration = time.time() - app.state.start_time
-    logger.info(f"🎉 API startup complete - {startup_duration:.2f}s")
+    logger.info("API startup complete", startup_seconds=round(startup_duration,2), emoji="🎉")
 
 
 # ==========================================
@@ -337,12 +339,12 @@ async def consolidated_startup():
 @app.on_event("shutdown")
 async def consolidated_shutdown():
     """Graceful shutdown with proper cleanup order."""
-    logger.info("🛑 AI Trading System API shutting down...")
+    logger.info("API shutting down", phase="shutdown", emoji="🛑")
     shutdown_start = time.time()
     
     # PHASE 1: Stop accepting new connections and cancel background tasks
     try:
-        logger.info("Phase 1: Stopping background services")
+        logger.info("Stopping background services", phase="shutdown-1")
         
         # Stop WebSocket streaming
         try:
@@ -356,68 +358,73 @@ async def consolidated_shutdown():
                     await app.state.websocket_task
                 except asyncio.CancelledError:
                     pass
-            logger.info("✅ WebSocket streaming stopped")
+            logger.info("WebSocket streaming stopped", phase="shutdown-1", result="success")
         except ImportError:
-            logger.info("ℹ️ WebSocket manager not loaded")
-        except Exception as e:
-            logger.warning(f"⚠️ Error stopping WebSocket streaming: {e}")
-    except Exception as e:
-        logger.error(f"❌ Error in shutdown phase 1: {e}")
+            logger.info("WebSocket manager not loaded", phase="shutdown-1", skipped=True)
+        except TRANSIENT_ERRORS as e:
+            logger.warning("Transient error stopping WebSocket streaming", error=str(e), phase="shutdown-1")
+        except Exception as e:  # noqa: BLE001 - Unexpected; continue shutdown
+            logger.warning("Error stopping WebSocket streaming", error=str(e), phase="shutdown-1")
+    except Exception as e:  # noqa: BLE001 - Grouping unexpected shutdown phase errors
+        logger.error("Error in shutdown phase 1", error=str(e), phase="shutdown-1")
     
     # PHASE 2: Close external connections (rate limiter, databases)
     try:
-        logger.info("Phase 2: Closing external connections")
-        
+        logger.info("Closing external connections", phase="shutdown-2")
+
         # Close rate limiter connections
         try:
             from api.rate_limiter import get_rate_limiter
             limiter = await get_rate_limiter()
             await limiter.close()
-            logger.info("✅ Rate limiter connections closed")
+            logger.info("Rate limiter connections closed", phase="shutdown-2")
         except ImportError:
-            logger.info("ℹ️ Rate limiter not loaded")
-        except Exception as e:
-            logger.warning(f"⚠️ Error closing rate limiter: {e}")
+            logger.info("Rate limiter not loaded", phase="shutdown-2", skipped=True)
+        except TRANSIENT_ERRORS as e:
+            logger.warning("Transient error closing rate limiter", error=str(e), phase="shutdown-2")
+        except Exception as e:  # noqa: BLE001 - Non-fatal unexpected close error
+            logger.warning("Error closing rate limiter", error=str(e), phase="shutdown-2")
 
         # Stop drift monitoring task
         try:
             if hasattr(app.state, 'drift_task'):
                 from trading_common.drift_scheduler import stop_drift_monitor
                 await stop_drift_monitor(app.state.drift_task)
-        except Exception as e:
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"⚠️ Transient error stopping drift monitor: {e}")
+        except Exception as e:  # noqa: BLE001 - Unexpected; continue
             logger.warning(f"⚠️ Error stopping drift monitor: {e}")
-        
+
         # Close security store connections
         try:
             from trading_common.security_store import get_security_store
             store = await get_security_store()
             await store.close()
-            logger.info("✅ Security store connections closed")
-        except Exception as e:
-            logger.warning(f"⚠️ Error closing security store: {e}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in shutdown phase 2: {e}")
+            logger.info("Security store connections closed", phase="shutdown-2")
+        except TRANSIENT_ERRORS as e:
+            logger.warning("Transient error closing security store", error=str(e), phase="shutdown-2")
+        except Exception as e:  # noqa: BLE001 - Unexpected; continue
+            logger.warning("Error closing security store", error=str(e), phase="shutdown-2")
+
+    except Exception as e:  # noqa: BLE001 - Grouping external connection shutdown errors
+        logger.error("Error in shutdown phase 2", error=str(e), phase="shutdown-2")
     
     # PHASE 3: Final cleanup and logging
     try:
-        logger.info("Phase 3: Final cleanup")
-        
+        logger.info("Final cleanup", phase="shutdown-3")
         # Any additional cleanup here
         uptime = time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0
         shutdown_time = time.time() - shutdown_start
-        
-        logger.info("✅ Services cleanup completed")
-        logger.info(f"📊 Uptime: {uptime:.2f}s, Shutdown time: {shutdown_time:.2f}s")
-        
-    except Exception as e:
-        logger.error(f"❌ Error in shutdown phase 3: {e}")
+        logger.info("Services cleanup completed", phase="shutdown-3")
+        logger.info("Uptime & shutdown metrics", uptime_seconds=round(uptime,2), shutdown_seconds=round(shutdown_time,2))
+    except Exception as e:  # noqa: BLE001 - Final cleanup resilience
+        logger.error("Error in shutdown phase 3", error=str(e), phase="shutdown-3")
     
-    logger.info("🏁 API shutdown complete")
+    logger.info("API shutdown complete", phase="shutdown", emoji="🏁")
 
 
 # Import JWT authentication
-from api.auth import get_current_active_user, get_optional_user, User
+from api.auth import get_current_active_user, get_optional_user  # type: ignore[import-not-found]
 
 # Create compatibility aliases for legacy router imports
 verify_token = get_current_active_user
@@ -445,7 +452,7 @@ async def health_check():
         store = await get_security_store()
         store_health = await store.get_store_health()
         security_store_health = store_health.get("status", "unknown")
-    except Exception:
+    except Exception:  # Broad catch: security store health non-critical
         security_store_health = "unavailable"
     
     return {
@@ -480,6 +487,77 @@ async def root():
             "metrics": "/metrics"
         }
     }
+
+
+# Readiness endpoint (internal operational readiness)
+@app.get("/ready")
+async def readiness_check():
+    """Aggregated readiness probe for orchestration / load balancers.
+    Returns 200 only if critical subsystems are available.
+    """
+    components = {}
+    overall_ok = True
+
+    # Security store
+    try:
+        from trading_common.security_store import get_security_store
+        store = await get_security_store()
+        health = await store.get_store_health()
+        components['security_store'] = health.get('status', 'unknown')
+        if components['security_store'] != 'healthy':
+            overall_ok = False
+    except Exception as e:  # noqa: BLE001 - Component readiness failure captured
+        components['security_store'] = f'error: {e}'
+        overall_ok = False
+
+    # Rate limiter
+    try:
+        from api.rate_limiter import get_rate_limiter
+        rl = await get_rate_limiter()
+        components['rate_limiter'] = 'connected' if rl.connected else 'degraded'
+        if not rl.connected:
+            overall_ok = False
+    except Exception as e:  # noqa: BLE001 - Rate limiter readiness failure captured
+        components['rate_limiter'] = f'error: {e}'
+        overall_ok = False
+
+    # Feature store & model registry summary (best-effort)
+    try:
+        from trading_common.feature_store import get_feature_store
+        fs = await get_feature_store()
+        components['feature_store'] = 'available' if fs else 'unavailable'
+    except Exception as e:  # noqa: BLE001 - Feature store optional
+        components['feature_store'] = f'error: {e}'
+    # Model registry
+    try:
+        from trading_common.model_registry import get_model_registry
+        reg = await get_model_registry()
+        components['model_registry'] = 'available' if reg else 'unavailable'
+    except Exception as e:  # noqa: BLE001 - Model registry optional
+        components['model_registry'] = f'error: {e}'
+
+    # Drift monitor
+    components['drift_monitor'] = 'running' if hasattr(app.state, 'drift_task') else 'stopped'
+
+    # Circuit breakers
+    try:
+        breakers = get_all_circuit_breakers()
+        open_breakers = [n for n,s in breakers.items() if s.get('state') == 'open']
+        components['circuit_breakers_open'] = len(open_breakers)
+        if open_breakers:
+            overall_ok = False
+    except Exception as e:  # noqa: BLE001 - Circuit breaker enumeration tolerance
+        components['circuit_breakers'] = f'error: {e}'
+
+    status_code = 200 if overall_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            'status': 'ready' if overall_ok else 'degraded',
+            'timestamp': datetime.utcnow().isoformat(),
+            'components': components
+        }
+    )
 
 
 # Service status endpoint with proper error handling
@@ -524,7 +602,9 @@ async def detailed_health_check():
                 return service_name, {"status": "timeout", "error": "Health check timed out"}
             except ImportError:
                 return service_name, {"status": "not_available", "error": "Service not loaded"}
-            except Exception as e:
+            except TRANSIENT_ERRORS as e:
+                return service_name, {"status": "transient_error", "error": str(e)}
+            except Exception as e:  # noqa: BLE001 - Unexpected service health error
                 return service_name, {"status": "error", "error": str(e)}
         
         # Run service health checks concurrently
@@ -561,7 +641,7 @@ async def detailed_health_check():
             "overall_healthy": overall_healthy
         }
         
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Aggregate health assembly safeguard
         logger.error(f"Health check error: {e}")
         return {
             "status": "error",
@@ -588,12 +668,13 @@ except ImportError as e:
 
 
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn  # Local import to avoid dependency at module import time
     
     # Production-ready configuration
+    # Use string defaults for os.getenv to avoid type warnings (then cast)
     config = {
         "host": "0.0.0.0",
-        "port": int(os.getenv("PORT", 8000)),
+        "port": int(os.getenv("PORT", "8000")),
         "log_level": "info",
         "access_log": True,
         "server_header": False,  # Security: hide server info
@@ -608,7 +689,7 @@ if __name__ == "__main__":
         })
     else:
         config.update({
-            "workers": int(os.getenv("WORKERS", 4)),
+            "workers": int(os.getenv("WORKERS", "4")),
             "loop": "uvloop" if "uvloop" in str(uvicorn) else "asyncio",
             "http": "httptools" if "httptools" in str(uvicorn) else "h11",
         })
@@ -630,25 +711,27 @@ async def ml_status():
         info['features_registered'] = len(fs.feature_definitions)
         row = await fs.db.fetch_one("SELECT COUNT(*) AS c FROM feature_views")
         info['feature_views'] = row['c'] if row else 0
-    except Exception as e:
+    except TRANSIENT_ERRORS as e:
+        info['feature_store_error'] = f'transient: {e}'
+    except Exception as e:  # noqa: BLE001 - Unexpected feature store error
         info['feature_store_error'] = str(e)
     # Drift monitor
     try:
-        from trading_common.drift_scheduler import start_drift_monitor
-        # access singleton if already started
-        monitor = getattr(start_drift_monitor, '_MONITOR', None)  # may not exist
-        if hasattr(app.state, 'drift_task'):
-            info['drift_monitor'] = 'running'
-        else:
-            info['drift_monitor'] = 'stopped'
-    except Exception as e:
+        # Drift monitor status inferred from app state (stubbed scheduler)
+        from trading_common.drift_scheduler import start_drift_monitor  # noqa: F401
+        info['drift_monitor'] = 'running' if hasattr(app.state, 'drift_task') else 'stopped'
+    except TRANSIENT_ERRORS as e:
+        info['drift_monitor_error'] = f'transient: {e}'
+    except Exception as e:  # noqa: BLE001 - Unexpected drift monitor error
         info['drift_monitor_error'] = str(e)
     # Experiment tracker
     try:
         from trading_common.experiment_tracking import get_experiment_tracker
-        tracker = await get_experiment_tracker()
+        await get_experiment_tracker()
         info['experiment_tracking'] = 'available'
-    except Exception as e:
+    except TRANSIENT_ERRORS as e:
+        info['experiment_tracking'] = f'transient: {e}'
+    except Exception as e:  # noqa: BLE001 - Unexpected experiment tracking error
         info['experiment_tracking'] = f'error: {e}'
     info['timestamp'] = datetime.utcnow().isoformat()
     return info

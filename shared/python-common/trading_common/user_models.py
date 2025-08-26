@@ -62,7 +62,7 @@ class Users(Base):
     
     # Permissions and metadata
     permissions = Column(JSON)  # Set of permission strings
-    metadata = Column(JSON)  # Additional user data
+    user_metadata = Column(JSON)  # Additional user data
     
     # Timestamps
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -105,7 +105,7 @@ class UserSessions(Base):
     revoke_reason = Column(String(255))
     
     # Metadata
-    metadata = Column(JSON)
+    session_metadata = Column(JSON)
     
     # Relationships
     user = relationship("Users", back_populates="sessions")
