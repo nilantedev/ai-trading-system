@@ -11,10 +11,10 @@ from typing import Optional, Dict, Any, List
 
 # NOTE: get_database import path may differ; using local lazy import wrapper to avoid attribute errors.
 try:  # narrow to ImportError only
-    from .database import get_database  # type: ignore[attr-defined]
+    from .database_manager import get_database_manager as get_database  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - fallback placeholder
     async def get_database():  # type: ignore
-        raise RuntimeError("get_database import failed; provide trading_common.database.get_database")
+        raise RuntimeError("get_database import failed; provide trading_common.database_manager.get_database_manager")
 
 class ModelState(str, Enum):
     DRAFT = "DRAFT"

@@ -14,7 +14,7 @@ from enum import Enum
 import logging
 
 try:
-    import aioredis
+    import redis.asyncio as aioredis
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
@@ -153,7 +153,7 @@ class PersistentSecurityStore:
             raise RuntimeError("Redis required for persistent security store")
         
         try:
-            self.redis = aioredis.from_url(
+            self.redis = await aioredis.from_url(
                 self.redis_url,
                 encoding="utf-8",
                 decode_responses=True,

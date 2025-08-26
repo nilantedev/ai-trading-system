@@ -510,7 +510,7 @@ class WebSocketStreamer:
     def __init__(self, manager: ConnectionManager):
         self.manager = manager
         self.is_streaming = False
-    self.stream_tasks: List[asyncio.Task] = []
+        self.stream_tasks: List[asyncio.Task] = []
         
     async def start_streaming(self):
         """Start all streaming tasks."""

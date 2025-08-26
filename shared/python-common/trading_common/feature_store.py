@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 import uuid
 
 from .cache import get_trading_cache
-from .database import get_database
+from .database_manager import get_database_manager
 from .models import MarketData
 
 logger = logging.getLogger(__name__)
@@ -161,7 +161,7 @@ class TechnicalIndicatorComputer(BaseFeatureComputer):
         features = []
         
         # Get market data for computation
-        db = await get_database()
+        db = await get_database_manager()
         
         for entity_id in entity_ids:
             # Fetch historical data

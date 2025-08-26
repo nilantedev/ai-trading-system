@@ -69,3 +69,7 @@ newsapi-python>=0.2.7
 # dit>=1.4.0
 jpype1>=1.4.1
 mutual-info>=0.3.1
+
+# Security and secrets management
+hvac>=2.3.0
+PyJWT>=2.8.0

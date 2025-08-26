@@ -41,10 +41,10 @@ from typing import Optional, Dict, Any, List, AsyncIterator
 import logging
 
 try:  # local project DB util
-    from .database import get_database  # type: ignore
+    from .database_manager import get_database_manager as get_database  # type: ignore
 except ImportError:  # pragma: no cover
     async def get_database():  # type: ignore
-        raise RuntimeError("database module not available")
+        raise RuntimeError("database_manager module not available")
 
 logger = logging.getLogger(__name__)
 

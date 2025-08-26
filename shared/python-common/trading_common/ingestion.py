@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import json
 
 from .models import MarketData, NewsEvent, TechnicalIndicator, OptionsData
-from .database import get_database_manager, QuestDBOperations
+from .database_manager import get_database_manager, QuestDBOperations
 from .cache import get_trading_cache
 from .config import get_settings
 from .logging import get_logger
