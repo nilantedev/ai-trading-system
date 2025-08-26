@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Trading System Automated Backup
+After=network.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/srv/trading
+ExecStart=/srv/trading/scripts/automated_backup.sh
+StandardOutput=journal
+StandardError=journal
+
+# Restart policy
+Restart=on-failure
+RestartSec=300
+
+# Environment
+EnvironmentFile=/srv/trading/.env.production
+
+[Install]
+WantedBy=multi-user.target

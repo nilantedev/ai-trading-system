@@ -265,3 +265,55 @@ config/local/
 config/personal/
 override.conf
 local.conf
+# Production secrets - NEVER commit these
+.env.production
+.env.staging
+secrets/
+*.key
+*.pem
+*.crt
+*.p12
+
+# Backup files
+backups/
+*.backup
+*.dump
+*.tar.gz.enc
+
+# Local development
+.env.local
+.env.development
+
+# Trading data
+data/*.csv
+data/*.json
+models/*.pkl
+models/*.h5
+
+# Logs
+logs/
+*.log
+
+# Test coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+volumes/
