@@ -328,6 +328,40 @@ class FeatureStore:
         CREATE INDEX IF NOT EXISTS idx_feature_values_name_time
         ON feature_values(feature_name, timestamp DESC)
         """)
+
+        # Feature views metadata
+        await self.db.execute("""
+        CREATE TABLE IF NOT EXISTS feature_views (
+            view_name VARCHAR(255) NOT NULL,
+            version VARCHAR(50) NOT NULL DEFAULT '1',
+            feature_names JSONB NOT NULL,
+            description TEXT,
+            entities JSONB,
+            tags JSONB,
+            transformation_logic TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(view_name, version)
+        )
+        """)
+
+        # Materialized feature view snapshots (denormalized for fast serving)
+        await self.db.execute("""
+        CREATE TABLE IF NOT EXISTS feature_view_materializations (
+            view_name VARCHAR(255) NOT NULL,
+            version VARCHAR(50) NOT NULL,
+            entity_id VARCHAR(100) NOT NULL,
+            as_of TIMESTAMP NOT NULL,
+            features JSONB NOT NULL,
+            vector_id VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(view_name, version, entity_id, as_of)
+        )
+        """)
+
+        await self.db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_feature_view_materializations_lookup
+        ON feature_view_materializations(view_name, version, entity_id, as_of DESC)
+        """)
     
     async def _register_default_features(self):
         """Register built-in feature definitions."""
@@ -656,6 +690,58 @@ class FeatureStore:
             quality_report["quality_score"] = 0.0
         
         return quality_report
+
+    # ---------------- Feature Views -----------------
+    async def register_feature_view(self, view_name: str, feature_names: List[str], *, version: str = "1", description: Optional[str] = None, entities: Optional[List[str]] = None, tags: Optional[Dict[str, Any]] = None, transformation_logic: Optional[str] = None):
+        """Register a logical feature view (collection of feature names)."""
+        await self.db.execute("""
+        INSERT INTO feature_views(view_name, version, feature_names, description, entities, tags, transformation_logic)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (view_name, version) DO UPDATE SET description=EXCLUDED.description, feature_names=EXCLUDED.feature_names, tags=EXCLUDED.tags, transformation_logic=EXCLUDED.transformation_logic
+        """, [view_name, version, json.dumps(feature_names), description, json.dumps(entities or []), json.dumps(tags or {}), transformation_logic])
+        logger.info("Registered feature view %s v%s (%d features)", view_name, version, len(feature_names))
+
+    async def materialize_feature_view(self, view_name: str, *, version: str = "1", entity_ids: List[str], as_of: datetime, backfill_hours: int = 0) -> int:
+        """Materialize a snapshot for the given entities at a timestamp.
+
+        Grabs most recent values <= as_of for each feature in view and stores consolidated row.
+        backfill_hours optionally computes additional hourly snapshots (as_of - n .. as_of).
+        Returns number of rows materialized.
+        """
+        # Load view metadata
+        row = await self.db.fetch_one("SELECT feature_names FROM feature_views WHERE view_name=%s AND version=%s", [view_name, version])
+        if not row:
+            raise ValueError(f"Feature view {view_name} v{version} not found")
+        feature_names = json.loads(row['feature_names'])
+        timestamps = [as_of]
+        if backfill_hours > 0:
+            base = as_of
+            timestamps.extend([base - timedelta(hours=i) for i in range(1, backfill_hours + 1)])
+        inserted = 0
+        for ts in timestamps:
+            for entity_id in entity_ids:
+                vector = await self.get_feature_vector(entity_id, ts, feature_names)
+                if not vector:
+                    continue
+                features_dict = vector.get_feature_dict()
+                await self.db.execute("""
+                INSERT INTO feature_view_materializations(view_name, version, entity_id, as_of, features, vector_id)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (view_name, version, entity_id, as_of) DO UPDATE SET features=EXCLUDED.features, vector_id=EXCLUDED.vector_id, created_at=CURRENT_TIMESTAMP
+                """, [view_name, version, entity_id, ts, json.dumps(features_dict), vector.vector_id])
+                inserted += 1
+        logger.info("Materialized feature view %s v%s rows=%d", view_name, version, inserted)
+        return inserted
+
+    async def get_feature_view_snapshot(self, view_name: str, *, version: str = "1", entity_id: str, as_of: datetime) -> Optional[Dict[str, Any]]:
+        row = await self.db.fetch_one("""
+        SELECT features, vector_id FROM feature_view_materializations
+        WHERE view_name=%s AND version=%s AND entity_id=%s AND as_of <= %s
+        ORDER BY as_of DESC LIMIT 1
+        """, [view_name, version, entity_id, as_of])
+        if not row:
+            return None
+        return {"features": row['features'], "vector_id": row.get('vector_id')}
 
 
 # Global feature store instance

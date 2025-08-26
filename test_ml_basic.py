@@ -3,100 +3,112 @@
 Basic test of core ML components without Redis dependencies.
 """
 
+import pytest
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
+from enum import Enum
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 # Add paths for imports
 parent_dir = Path(__file__).parent
 sys.path.append(str(parent_dir))
 sys.path.append(str(parent_dir / "shared" / "python-common"))
+    
+# Define basic models to test structure
+class ModelType(str, Enum):
+    REGRESSOR = "regressor"
+    CLASSIFIER = "classifier"
 
-print("🧪 Testing Core ML Components...")
+class ValidationStrategy(str, Enum):
+    TIME_SERIES_SPLIT = "time_series_split"
+    WALK_FORWARD = "walk_forward"
 
-try:
-    # Import pydantic models directly (without service dependencies)
-    import pandas as pd
-    import numpy as np
-    from enum import Enum
-    from typing import List, Optional
-    from pydantic import BaseModel, Field
+class TrainingConfig(BaseModel):
+    model_name: str
+    model_type: ModelType
+    feature_names: List[str]
+    target_variable: str
+    train_start: datetime
+    train_end: datetime
+    validation_strategy: ValidationStrategy = ValidationStrategy.TIME_SERIES_SPLIT
+    version: str = "1.0.0"
+
+class FeatureDefinition(BaseModel):
+    name: str
+    description: str
+    feature_type: str
+    source: str
+    computation_logic: str
+    dependencies: List[str] = Field(default_factory=list)
+    version: str = "1.0.0"
     
-    print("✅ Core dependencies available")
+class TestMLModels:
+    """Test suite for ML model definitions."""
     
-    # Define basic models to test structure
-    class ModelType(str, Enum):
-        REGRESSOR = "regressor"
-        CLASSIFIER = "classifier"
-    
-    class ValidationStrategy(str, Enum):
-        TIME_SERIES_SPLIT = "time_series_split"
-        WALK_FORWARD = "walk_forward"
-    
-    class TrainingConfig(BaseModel):
-        model_name: str
-        model_type: ModelType
-        feature_names: List[str]
-        target_variable: str
-        train_start: datetime
-        train_end: datetime
-        validation_strategy: ValidationStrategy = ValidationStrategy.TIME_SERIES_SPLIT
-        version: str = "1.0.0"
-    
-    class FeatureDefinition(BaseModel):
-        name: str
-        description: str
-        feature_type: str
-        source: str
-        computation_logic: str
-        dependencies: List[str] = Field(default_factory=list)
-        version: str = "1.0.0"
-    
-    # Test data model creation
-    feature_def = FeatureDefinition(
-        name="sma_20",
-        description="20-period simple moving average",
-        feature_type="float",
-        source="market_data", 
-        computation_logic="SMA(close, 20)",
-        dependencies=["close_price"]
-    )
-    print(f"✅ Feature Definition: {feature_def.name}")
-    
-    config = TrainingConfig(
-        model_name="momentum_model",
-        model_type=ModelType.REGRESSOR,
-        feature_names=["sma_5", "sma_10", "sma_20", "rsi_14"],
-        target_variable="next_return",
-        train_start=datetime.utcnow() - timedelta(days=200),
-        train_end=datetime.utcnow() - timedelta(days=30)
-    )
-    print(f"✅ Training Config: {config.model_name}")
-    
-    # Test basic technical indicators
-    def calculate_sma(prices: List[float], period: int) -> List[float]:
-        """Calculate Simple Moving Average"""
-        sma_values = []
-        for i in range(len(prices)):
-            if i < period - 1:
-                sma_values.append(np.nan)
-            else:
-                sma_values.append(np.mean(prices[i-period+1:i+1]))
-        return sma_values
-    
-    def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
-        """Calculate Relative Strength Index"""
-        if len(prices) < period + 1:
-            return [np.nan] * len(prices)
-            
-        deltas = np.diff(prices)
-        gain = np.where(deltas > 0, deltas, 0)
-        loss = np.where(deltas < 0, -deltas, 0)
+    def test_feature_definition_creation(self):
+        """Test creating a feature definition."""
+        feature_def = FeatureDefinition(
+            name="sma_20",
+            description="20-period simple moving average",
+            feature_type="float",
+            source="market_data", 
+            computation_logic="SMA(close, 20)",
+            dependencies=["close_price"]
+        )
         
-        avg_gain = np.mean(gain[:period])
-        avg_loss = np.mean(loss[:period])
+        assert feature_def.name == "sma_20"
+        assert feature_def.feature_type == "float"
+        assert feature_def.source == "market_data"
+        assert "close_price" in feature_def.dependencies
+        assert feature_def.version == "1.0.0"
+    
+    def test_training_config_creation(self):
+        """Test creating a training configuration."""
+        config = TrainingConfig(
+            model_name="momentum_model",
+            model_type=ModelType.REGRESSOR,
+            feature_names=["sma_5", "sma_10", "sma_20", "rsi_14"],
+            target_variable="next_return",
+            train_start=datetime.utcnow() - timedelta(days=200),
+            train_end=datetime.utcnow() - timedelta(days=30)
+        )
         
-        rsi_values = [np.nan] * period
+        assert config.model_name == "momentum_model"
+        assert config.model_type == ModelType.REGRESSOR
+        assert len(config.feature_names) == 4
+        assert "rsi_14" in config.feature_names
+        assert config.target_variable == "next_return"
+        assert config.validation_strategy == ValidationStrategy.TIME_SERIES_SPLIT
+        assert (config.train_end - config.train_start).days == 170
+    
+# Test basic technical indicators
+def calculate_sma(prices: List[float], period: int) -> List[float]:
+    """Calculate Simple Moving Average"""
+    sma_values = []
+    for i in range(len(prices)):
+        if i < period - 1:
+            sma_values.append(np.nan)
+        else:
+            sma_values.append(np.mean(prices[i-period+1:i+1]))
+    return sma_values
+
+def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
+    """Calculate Relative Strength Index"""
+    if len(prices) < period + 1:
+        return [np.nan] * len(prices)
+        
+    deltas = np.diff(prices)
+    gain = np.where(deltas > 0, deltas, 0)
+    loss = np.where(deltas < 0, -deltas, 0)
+    
+    avg_gain = np.mean(gain[:period])
+    avg_loss = np.mean(loss[:period])
+    
+    rsi_values = [np.nan] * period
         
         for i in range(period, len(prices)):
             if i == period:

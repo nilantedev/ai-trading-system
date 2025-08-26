@@ -36,7 +36,10 @@ except ImportError:
 from .config import get_settings
 from .logging import get_logger
 from .security_store import get_security_store, log_security_event, SecurityEventType
-from .database import get_redis_client
+from .database import get_redis_client, DatabaseManager
+from .user_repository import UserRepository
+from .user_models import Users, UserSessions, UserRole as DBUserRole, UserStatus as DBUserStatus
+import functools
 
 logger = get_logger(__name__)
 
@@ -195,6 +198,7 @@ class UserManager:
         # Database connection
         self._engine = None
         self._session_factory = None
+        self._db_manager = None
         
         if SQLALCHEMY_AVAILABLE:
             self._init_database()
@@ -202,17 +206,28 @@ class UserManager:
     def _init_database(self):
         """Initialize database connection and tables."""
         try:
-            # Create async engine
-            db_url = self.settings.database_url.replace("postgresql://", "postgresql+asyncpg://")
+            # Get database URL from settings
+            db_url = self.settings.postgres_url or self.settings.database_url
+            if not db_url:
+                db_url = "postgresql://trading_user:trading_password@localhost:5432/trading_db"
+            
+            # Ensure async URL format
+            if "postgresql://" in db_url:
+                db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+            
             self._engine = create_async_engine(db_url, echo=False)
             self._session_factory = async_sessionmaker(self._engine, class_=AsyncSession)
             
-            # We'll create tables on startup
+            # Initialize database manager
+            self._db_manager = DatabaseManager()
+            
             logger.info("Database connection initialized for user management")
             
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
-            raise
+            # Don't raise - allow system to work with degraded functionality
+            self._engine = None
+            self._session_factory = None
     
     async def create_user(
         self,
@@ -546,29 +561,156 @@ class UserManager:
     
     async def _user_exists(self, username: str, email: str) -> bool:
         """Check if user already exists."""
-        # This would query the database in a real implementation
-        # For now, return False to allow user creation
-        return False
+        if not self._session_factory:
+            return False
+        
+        try:
+            async with self._session_factory() as session:
+                repo = UserRepository(session)
+                user_by_username = await repo.get_user_by_username(username)
+                user_by_email = await repo.get_user_by_email(email)
+                return user_by_username is not None or user_by_email is not None
+        except Exception as e:
+            logger.error(f"Error checking if user exists: {e}")
+            return False
     
     async def _store_user(self, user: User):
         """Store user in database."""
-        # Placeholder - would implement actual database storage
-        pass
+        if not self._session_factory:
+            logger.warning("Database not available, user not persisted")
+            return
+        
+        try:
+            async with self._session_factory() as session:
+                repo = UserRepository(session)
+                
+                # Convert User dataclass to database model
+                user_data = {
+                    'user_id': user.user_id,
+                    'username': user.username,
+                    'email': user.email,
+                    'role': user.role,
+                    'status': user.status,
+                    'password_hash': user.password_hash,
+                    'salt': user.salt,
+                    'password_expires_at': user.password_expires_at,
+                    'failed_login_attempts': user.failed_login_attempts,
+                    'account_locked_until': user.account_locked_until,
+                    'two_factor_enabled': user.two_factor_enabled,
+                    'permissions': list(user.permissions) if user.permissions else [],
+                    'metadata': user.metadata or {},
+                    'created_at': user.created_at,
+                    'updated_at': user.updated_at
+                }
+                
+                await repo.create_user(user_data)
+                logger.info(f"User {user.username} stored in database")
+                
+        except Exception as e:
+            logger.error(f"Failed to store user in database: {e}")
     
     async def _get_user_by_username(self, username: str) -> Optional[User]:
         """Get user by username from database."""
-        # Placeholder - would implement actual database query
-        return None
+        if not self._session_factory:
+            return None
+        
+        try:
+            async with self._session_factory() as session:
+                repo = UserRepository(session)
+                db_user = await repo.get_user_by_username(username)
+                
+                if not db_user:
+                    return None
+                
+                # Convert database model to User dataclass
+                return User(
+                    user_id=db_user.user_id,
+                    username=db_user.username,
+                    email=db_user.email,
+                    role=UserRole(db_user.role.value),
+                    status=UserStatus(db_user.status.value),
+                    created_at=db_user.created_at,
+                    updated_at=db_user.updated_at,
+                    last_login=db_user.last_login,
+                    password_hash=db_user.password_hash,
+                    salt=db_user.salt,
+                    failed_login_attempts=db_user.failed_login_attempts,
+                    account_locked_until=db_user.account_locked_until,
+                    password_expires_at=db_user.password_expires_at,
+                    two_factor_enabled=db_user.two_factor_enabled,
+                    api_key=db_user.api_key,
+                    permissions=set(db_user.permissions) if db_user.permissions else set(),
+                    metadata=db_user.metadata or {}
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to get user by username: {e}")
+            return None
     
     async def _get_user_by_id(self, user_id: str) -> Optional[User]:
         """Get user by ID from database."""
-        # Placeholder - would implement actual database query
-        return None
+        if not self._session_factory:
+            return None
+        
+        try:
+            async with self._session_factory() as session:
+                repo = UserRepository(session)
+                db_user = await repo.get_user_by_id(user_id)
+                
+                if not db_user:
+                    return None
+                
+                # Convert database model to User dataclass
+                return User(
+                    user_id=db_user.user_id,
+                    username=db_user.username,
+                    email=db_user.email,
+                    role=UserRole(db_user.role.value),
+                    status=UserStatus(db_user.status.value),
+                    created_at=db_user.created_at,
+                    updated_at=db_user.updated_at,
+                    last_login=db_user.last_login,
+                    password_hash=db_user.password_hash,
+                    salt=db_user.salt,
+                    failed_login_attempts=db_user.failed_login_attempts,
+                    account_locked_until=db_user.account_locked_until,
+                    password_expires_at=db_user.password_expires_at,
+                    two_factor_enabled=db_user.two_factor_enabled,
+                    api_key=db_user.api_key,
+                    permissions=set(db_user.permissions) if db_user.permissions else set(),
+                    metadata=db_user.metadata or {}
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to get user by ID: {e}")
+            return None
     
     async def _update_user(self, user: User):
         """Update user in database."""
-        # Placeholder - would implement actual database update
-        pass
+        if not self._session_factory:
+            logger.warning("Database not available, user update not persisted")
+            return
+        
+        try:
+            async with self._session_factory() as session:
+                repo = UserRepository(session)
+                
+                updates = {
+                    'status': user.status.value,
+                    'failed_login_attempts': user.failed_login_attempts,
+                    'account_locked_until': user.account_locked_until,
+                    'last_login': user.last_login,
+                    'password_hash': user.password_hash,
+                    'salt': user.salt,
+                    'password_expires_at': user.password_expires_at,
+                    'updated_at': user.updated_at
+                }
+                
+                await repo.update_user(user.user_id, updates)
+                logger.info(f"User {user.username} updated in database")
+                
+        except Exception as e:
+            logger.error(f"Failed to update user in database: {e}")
     
     async def _update_session(self, session: Session):
         """Update session in Redis."""

@@ -1,0 +1,292 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "AI Trading System - ML Model Performance",
+    "tags": ["trading-system", "ml", "models"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Model Accuracy",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "ml_model_accuracy",
+            "legendFormat": "{{model_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0.5
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.7
+                },
+                {
+                  "color": "green",
+                  "value": 0.85
+                }
+              ]
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Model Drift Score",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "ml_model_drift_score",
+            "legendFormat": "{{model_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.3
+                },
+                {
+                  "color": "red",
+                  "value": 0.7
+                }
+              ]
+            },
+            "unit": "short",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 6,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Feature Store Health",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "ml_feature_store_features_fresh / ml_feature_store_features_total",
+            "legendFormat": "Fresh Features %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0.7
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.9
+                },
+                {
+                  "color": "green",
+                  "value": 0.95
+                }
+              ]
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 4,
+        "title": "Inference Latency",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ml_inference_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.1
+                },
+                {
+                  "color": "red",
+                  "value": 0.5
+                }
+              ]
+            },
+            "unit": "s"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        }
+      },
+      {
+        "id": 5,
+        "title": "Model Performance Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "ml_model_accuracy",
+            "legendFormat": "Accuracy - {{model_name}}"
+          },
+          {
+            "expr": "ml_model_precision",
+            "legendFormat": "Precision - {{model_name}}"
+          },
+          {
+            "expr": "ml_model_recall",
+            "legendFormat": "Recall - {{model_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Score",
+            "min": 0,
+            "max": 1
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        }
+      },
+      {
+        "id": 6,
+        "title": "Feature Drift Detection",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "ml_feature_drift_score",
+            "legendFormat": "{{feature_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Drift Score",
+            "min": 0
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        }
+      },
+      {
+        "id": 7,
+        "title": "Model Predictions vs Actuals",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "ml_model_predictions",
+            "legendFormat": "Predictions - {{model_name}}"
+          },
+          {
+            "expr": "ml_model_actuals",
+            "legendFormat": "Actuals - {{model_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Value"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 16
+        }
+      },
+      {
+        "id": 8,
+        "title": "Feature Engineering Pipeline",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(ml_feature_computations_total[5m])",
+            "legendFormat": "Feature Computations/sec"
+          },
+          {
+            "expr": "ml_feature_cache_hit_rate",
+            "legendFormat": "Cache Hit Rate"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Rate"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 16
+        }
+      }
+    ],
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "refresh": "1m"
+  }
+}

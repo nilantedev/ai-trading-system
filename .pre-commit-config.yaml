@@ -138,6 +138,16 @@ repos:
       - id: commitizen
         stages: [commit-msg]
 
+  # Local security scanning
+  - repo: local
+    hooks:
+      - id: security-scan-light
+        name: Light Security Scan
+        entry: python scripts/security_scan_local.py --project-root .
+        language: system
+        pass_filenames: false
+        stages: [push]
+
 # Configuration for specific tools
 ci:
   autofix_commit_msg: |

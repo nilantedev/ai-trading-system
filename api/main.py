@@ -280,12 +280,49 @@ async def consolidated_startup():
         if settings.environment == "production":
             logger.warning("WebSocket streaming failed but not blocking production start")
     
-    # PHASE 5: Initialize core trading services (lazy loading)
+    # PHASE 5: Initialize core trading services (lazy loading) + ML wiring
     try:
         logger.info("Phase 5: Preparing trading system services (lazy loading)")
         # Services will be initialized on first request to avoid startup delays
         # This is a lazy loading approach for better startup performance
         logger.info("✅ Trading services ready for lazy initialization")
+        # Start drift monitoring background task & register production models
+        try:
+            from trading_common.drift_scheduler import start_drift_monitor
+            from trading_common.model_registry import get_model_registry, ModelState
+            registry = await get_model_registry()
+            rows = await registry.db.fetch_all("SELECT model_name, version FROM model_registry WHERE state='PRODUCTION'")
+            models = [(r['model_name'], r['version']) for r in rows]
+            interval = int(os.getenv('DRIFT_INTERVAL_SECONDS', '3600'))
+            app.state.drift_task = await start_drift_monitor(interval_seconds=interval, models=models)
+            logger.info("📈 Drift monitor started (models=%d interval=%ds)", len(models), interval)
+        except Exception as e:
+            logger.warning(f"Drift monitor not started: {e}")
+
+        # Register default feature view if missing
+        try:
+            from trading_common.feature_store import get_feature_store
+            store = await get_feature_store()
+            default_view = os.getenv('DEFAULT_FEATURE_VIEW', 'core_technical')
+            row = await store.db.fetch_one("SELECT 1 FROM feature_views WHERE view_name=%s AND version=%s", [default_view, '1'])
+            if not row:
+                core_features = ['sma_20', 'rsi_14']  # minimal set; extend later
+                await store.register_feature_view(default_view, core_features, description='Core technical indicators v1')
+                await store.materialize_feature_view(default_view, entity_ids=['AAPL','MSFT','GOOGL'], as_of=datetime.utcnow())
+                logger.info("🧱 Registered default feature view '%s' with %d features", default_view, len(core_features))
+        except Exception as e:
+            logger.warning(f"Feature view registration skipped: {e}")
+
+        # Log startup banner summary
+        try:
+            from trading_common.feature_store import get_feature_store
+            store = await get_feature_store()
+            feature_count = len(store.feature_definitions)
+            fv_count_row = await store.db.fetch_one("SELECT COUNT(*) AS c FROM feature_views")
+            fv_count = fv_count_row['c'] if fv_count_row else 0
+            logger.info("🔧 Startup ML Summary: features=%d feature_views=%d drift_monitor=%s experiment_tracking=enabled", feature_count, fv_count, 'on' if hasattr(app.state,'drift_task') else 'off')
+        except Exception as e:
+            logger.debug(f"Startup ML summary logging failed: {e}")
     except Exception as e:
         logger.error(f"Service initialization setup failed: {e}")
     
@@ -341,6 +378,14 @@ async def consolidated_shutdown():
             logger.info("ℹ️ Rate limiter not loaded")
         except Exception as e:
             logger.warning(f"⚠️ Error closing rate limiter: {e}")
+
+        # Stop drift monitoring task
+        try:
+            if hasattr(app.state, 'drift_task'):
+                from trading_common.drift_scheduler import stop_drift_monitor
+                await stop_drift_monitor(app.state.drift_task)
+        except Exception as e:
+            logger.warning(f"⚠️ Error stopping drift monitor: {e}")
         
         # Close security store connections
         try:
@@ -570,3 +615,40 @@ if __name__ == "__main__":
     
     logger.info(f"Starting server with config: {config}")
     uvicorn.run("main:app", **config)
+
+# =====================
+# ML STATUS ENDPOINT
+# =====================
+@app.get("/api/v1/ml/status")
+async def ml_status():
+    """Return status of ML/feature infrastructure (lightweight)."""
+    info: Dict[str, Any] = {}
+    # Feature store
+    try:
+        from trading_common.feature_store import get_feature_store
+        fs = await get_feature_store()
+        info['features_registered'] = len(fs.feature_definitions)
+        row = await fs.db.fetch_one("SELECT COUNT(*) AS c FROM feature_views")
+        info['feature_views'] = row['c'] if row else 0
+    except Exception as e:
+        info['feature_store_error'] = str(e)
+    # Drift monitor
+    try:
+        from trading_common.drift_scheduler import start_drift_monitor
+        # access singleton if already started
+        monitor = getattr(start_drift_monitor, '_MONITOR', None)  # may not exist
+        if hasattr(app.state, 'drift_task'):
+            info['drift_monitor'] = 'running'
+        else:
+            info['drift_monitor'] = 'stopped'
+    except Exception as e:
+        info['drift_monitor_error'] = str(e)
+    # Experiment tracker
+    try:
+        from trading_common.experiment_tracking import get_experiment_tracker
+        tracker = await get_experiment_tracker()
+        info['experiment_tracking'] = 'available'
+    except Exception as e:
+        info['experiment_tracking'] = f'error: {e}'
+    info['timestamp'] = datetime.utcnow().isoformat()
+    return info

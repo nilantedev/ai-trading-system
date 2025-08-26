@@ -59,6 +59,10 @@ class SignalConsensus:
     sizing_reasoning: str = ""  # Position sizing explanation
     alternative_data_signals: List = None  # Alternative data signals
     alternative_data_score: float = 0.0  # 0-1, overall alternative data sentiment
+    # Provenance (optional)
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
+    feature_vector_id: Optional[str] = None
 
 
 class SignalGenerationService:
@@ -432,7 +436,10 @@ class SignalGenerationService:
                     'position_size': consensus.position_size,
                     'risk_level': consensus.risk_level,
                     'strategy_breakdown': consensus.strategy_breakdown,
-                    'signal_count': len(consensus.signals)
+                    'signal_count': len(consensus.signals),
+                    'model_name': getattr(consensus, 'model_name', None),
+                    'model_version': getattr(consensus, 'model_version', None),
+                    'feature_vector_id': getattr(consensus, 'feature_vector_id', None)
                 }
                 
                 await self.cache.set_json(cache_key, cache_data, ttl=300)  # 5 minutes
@@ -531,7 +538,10 @@ class SignalGenerationService:
                         recommended_action=cached_data['recommended_action'],
                         position_size=cached_data['position_size'],
                         risk_level=cached_data['risk_level'],
-                        strategy_breakdown=cached_data['strategy_breakdown']
+                        strategy_breakdown=cached_data['strategy_breakdown'],
+                        model_name=cached_data.get('model_name'),
+                        model_version=cached_data.get('model_version'),
+                        feature_vector_id=cached_data.get('feature_vector_id')
                     )
             
         except Exception as e:
