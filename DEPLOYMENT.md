@@ -1,292 +1,354 @@
-# 🚀 AI Trading System - Final Deployment Checklist
+# 🚀 AI Trading System - Production Deployment Guide
 
-## ✅ Project Cleanup Completed
-
-### Environment Files
-- [x] Removed deprecated `.env.production.template`
-- [x] Consolidated to single `.env.production.example` template
-- [x] Removed all OpenAI/Anthropic API key references
-- [x] Added `.env.production` to `.gitignore`
-
-### Code Cleanup
-- [x] Removed all Python cache files (`__pycache__`, `.pyc`)
-- [x] Cleaned temporary files (`.tmp`, `.swp`, `~`)
-- [x] Moved test files to `tests/integration/`
-- [x] Created consolidated requirements file
-- [x] Removed hardcoded API keys
-
-### AI Models - 100% Local
-- [x] Replaced OpenAI Swarm with local orchestration
-- [x] Removed all paid API dependencies
-- [x] Configured Ollama for all AI operations
-- [x] Zero monthly API costs confirmed
-
-## 📋 Pre-Deployment Checklist
-
-### 1. System Requirements
-- [ ] **Operating System**: Ubuntu 24 (production) or Arch Linux (dev)
-- [ ] **Python**: 3.11 or higher installed
-- [ ] **Docker**: Latest version installed
-- [ ] **Docker Compose**: v2.0+ installed
-- [ ] **Ollama**: Installed and running
-- [ ] **Hardware**: 
-  - Min 32GB RAM (64GB recommended)
-  - Min 500GB SSD storage
-  - GPU optional but recommended for AI models
-
-### 2. Local AI Models Setup
-```bash
-# Install Ollama if not installed
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull required models (one-time setup)
-ollama pull qwen2.5:72b      # ~45GB - Analysis
-ollama pull deepseek-r1:70b  # ~42GB - Risk assessment
-ollama pull llama3.1:70b      # ~40GB - Strategy
-ollama pull mixtral:8x7b      # ~26GB - Fast inference
-ollama pull phi3:medium       # ~7GB - Sentiment
-
-# Verify models are downloaded
-ollama list
-```
-
-### 3. Environment Configuration
-- [ ] Copy environment template:
-  ```bash
-  cp .env.production.example .env.production
-  ```
-- [ ] Fill in ALL REQUIRED values in `.env.production`:
-  - [ ] Database credentials (DB_USER, DB_PASSWORD)
-  - [ ] Security keys (SECRET_KEY, JWT_SECRET, ENCRYPTION_KEY)
-  - [ ] Redis password
-  - [ ] Domain and SSL email
-  - [ ] Backup encryption key
-  - [ ] Market data API keys (optional - free tiers available)
-
-### 4. Database Setup
-- [ ] PostgreSQL installed or Docker container ready
-- [ ] Enable encryption:
-  ```bash
-  sudo ./scripts/enable_postgres_encryption.sh
-  ```
-- [ ] Create database and user
-- [ ] Run migrations:
-  ```bash
-  python scripts/run_migrations.py
-  ```
-
-### 5. Infrastructure Validation
-- [ ] Test Docker compose:
-  ```bash
-  docker-compose config
-  ```
-- [ ] Check Docker resources:
-  ```bash
-  docker system df
-  docker system prune -a  # Clean if needed
-  ```
-- [ ] Verify network configuration
-- [ ] Check firewall rules (ports 80, 443, 8000)
-
-### 6. Security Verification
-- [ ] All secrets in environment variables (not in code)
-- [ ] Rate limiter configured to fail-closed
-- [ ] SSL certificates ready (Let's Encrypt)
-- [ ] Backup encryption configured
-- [ ] No exposed debug endpoints
-
-### 7. Monitoring Setup
-- [ ] Prometheus configuration verified
-- [ ] Grafana dashboards imported
-- [ ] Alert rules configured
-- [ ] Log aggregation tested
-
-## 🚀 Deployment Steps
-
-### Step 1: Final System Check
-```bash
-# Run system check
-./scripts/check_system.sh
-
-# Verify all services are stopped
-docker-compose down
-
-# Clean any leftover data
-docker system prune -f
-```
-
-### Step 2: Build Application
-```bash
-# Build Docker images
-docker-compose build --no-cache
-
-# Verify images created
-docker images | grep trading
-```
-
-### Step 3: Initialize Services
-```bash
-# Start infrastructure services first
-docker-compose up -d postgres redis pulsar
-
-# Wait for services to be healthy
-sleep 30
-
-# Initialize database
-docker-compose run --rm api python scripts/init_database.py
-
-# Start remaining services
-docker-compose up -d
-```
-
-### Step 4: Verify Deployment
-```bash
-# Check all containers running
-docker-compose ps
-
-# Check logs for errors
-docker-compose logs --tail=50
-
-# Test API health
-curl http://localhost:8000/health
-
-# Check metrics endpoint
-curl http://localhost:8000/metrics
-```
-
-### Step 5: Configure ML Models
-```bash
-# Register initial models
-docker-compose exec api python -c "
-from services.ml.ml_orchestrator import get_ml_orchestrator
-import asyncio
-
-async def setup():
-    orchestrator = await get_ml_orchestrator()
-    await orchestrator.register_model('xgboost', 'AAPL')
-    await orchestrator.register_model('lightgbm', 'GOOGL')
-    await orchestrator.enable_continuous_learning()
-
-asyncio.run(setup())
-"
-```
-
-### Step 6: Production Deployment
-```bash
-# Use the production deployment script
-./deploy_production.sh
-
-# Monitor deployment
-tail -f logs/deployment.log
-```
-
-## 📊 Post-Deployment Verification
-
-### Health Checks
-- [ ] API responding: `http://your-domain/health`
-- [ ] Metrics available: `http://your-domain/metrics`
-- [ ] Grafana accessible: `http://your-domain:3000`
-- [ ] WebSocket connections working
-
-### Monitoring
-- [ ] Check Grafana dashboards
-- [ ] Verify Prometheus scraping
-- [ ] Test alerting rules
-- [ ] Review initial logs
-
-### ML System
-- [ ] Models training during off-hours
-- [ ] Continuous improvement running
-- [ ] Performance metrics collecting
-- [ ] Local AI models responding
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-1. **Ollama not responding**
-   ```bash
-   systemctl status ollama
-   systemctl restart ollama
-   ```
-
-2. **Database connection failed**
-   ```bash
-   docker-compose logs postgres
-   # Check credentials in .env.production
-   ```
-
-3. **Rate limiter issues**
-   ```bash
-   docker-compose logs redis
-   # Ensure Redis password is set
-   ```
-
-4. **AI models slow**
-   ```bash
-   # Check Ollama is using GPU if available
-   ollama run mixtral:8x7b --verbose
-   ```
-
-## 📈 Performance Optimization
-
-### After First Week
-- Review model performance metrics
-- Adjust training schedules based on usage
-- Optimize Docker resource limits
-- Fine-tune cache settings
-
-### Monthly Review
-- Analyze trading performance
-- Review and update ML models
-- Security audit
-- Backup restoration test
-
-## 🎉 Success Criteria
-
-Your deployment is successful when:
-- ✅ All containers running without errors
-- ✅ API responding to requests
-- ✅ Metrics being collected
-- ✅ ML models training automatically
-- ✅ No API costs incurred (all local)
-- ✅ Backups running automatically
-- ✅ Monitoring dashboards showing data
-
-## 📞 Support
-
-### Logs Location
-- Application: `logs/`
-- Docker: `docker-compose logs [service]`
-- System: `/var/log/`
-
-### Key Commands
-```bash
-# View all logs
-docker-compose logs -f
-
-# Restart a service
-docker-compose restart [service]
-
-# Check system status
-docker-compose ps
-docker stats
-
-# Emergency stop
-docker-compose down
-```
-
-## 🎊 Congratulations!
-
-Your AI Trading System is now:
-- **100% Local**: No external API dependencies
-- **Self-Improving**: Continuous learning enabled
-- **Production-Ready**: Enterprise-grade infrastructure
-- **Cost-Free**: Zero monthly API costs
-- **Secure**: Multi-layered security implemented
+## 🎯 DEPLOYMENT INFORMATION
+**Time Required**: 45-60 minutes  
+**Server**: 168.119.145.135  
+**Domain**: trading.main-nilante.com  
+**User**: nilante  
+**Path**: /srv/trading  
 
 ---
 
-**Last Updated**: $(date)
-**Version**: 1.0.0
-**Status**: READY FOR DEPLOYMENT
+## ⚡ QUICK START (If you know what you're doing)
+```bash
+# 1. SSH to server
+ssh nilante@168.119.145.135
+
+# 2. Clone and deploy
+git clone https://github.com/nilantedev/ai-trading-system.git /srv/trading
+cd /srv/trading
+cp .env.example .env.production
+# [Edit .env.production with secure values]
+./deploy_production.sh --skip-tests
+
+# 3. Verify
+curl http://localhost:8000/health
+```
+
+---
+
+## 📋 PHASE 1: PRE-DEPLOYMENT (5 min)
+
+### 1.1 Local Preparation
+```bash
+# Ensure you have SSH access
+ssh nilante@168.119.145.135 "echo 'Connected'"
+
+# Get latest code
+cd ~/main-nilante-server/ai-trading-system
+git pull origin main
+```
+
+### 1.2 Server Access
+```bash
+ssh nilante@168.119.145.135
+```
+
+---
+
+## 🔧 PHASE 2: SERVER SETUP (10 min)
+
+### 2.1 Directory Structure
+```bash
+# Create deployment directories
+sudo mkdir -p /srv/trading
+sudo mkdir -p /mnt/fastdrive/trading/{questdb,prometheus,grafana,pulsar,weaviate}
+sudo mkdir -p /mnt/bulkdata/trading/{minio,backups}
+sudo chown -R nilante:nilante /srv/trading /mnt/fastdrive/trading /mnt/bulkdata/trading
+
+# Verify
+df -h | grep -E "(srv|fastdrive|bulkdata)"
+```
+
+### 2.2 System Check
+```bash
+# Quick system verification
+echo "Python: $(python3 --version)"
+echo "Docker: $(docker --version)"
+echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+echo "Disk /srv: $(df -h /srv | tail -1 | awk '{print $4}')"
+```
+
+---
+
+## 🤖 PHASE 3: AI MODELS (15 min - can run parallel)
+
+### 3.1 Install Ollama
+```bash
+# Install if needed
+if ! command -v ollama &> /dev/null; then
+    curl -fsSL https://ollama.com/install.sh | sh
+    sudo systemctl enable ollama
+    sudo systemctl start ollama
+fi
+
+ollama version
+```
+
+### 3.2 Download Models (PARALLEL - Open 4 SSH sessions)
+```bash
+# Terminal 1
+ollama pull qwen2.5:72b      # 45GB
+
+# Terminal 2  
+ollama pull deepseek-r1:70b  # 42GB
+
+# Terminal 3
+ollama pull llama3.1:70b      # 40GB
+
+# Terminal 4
+ollama pull mixtral:8x7b      # 26GB
+ollama pull phi3:medium       # 7GB
+
+# Verify all models
+ollama list
+```
+
+---
+
+## 📦 PHASE 4: CODE DEPLOYMENT (5 min)
+
+### 4.1 Clone Repository
+```bash
+cd /srv
+sudo rm -rf trading  # Clean slate
+sudo git clone https://github.com/nilantedev/ai-trading-system.git trading
+sudo chown -R nilante:nilante trading
+cd trading
+```
+
+### 4.2 Environment Configuration
+```bash
+# Copy template
+cp .env.example .env.production
+
+# Generate ALL passwords at once
+cat > /tmp/passwords.txt << 'EOF'
+DB_PASSWORD=$(openssl rand -base64 32)
+DB_ROOT_PASSWORD=$(openssl rand -base64 32)  
+REDIS_PASSWORD=$(openssl rand -base64 32)
+JWT_SECRET=$(openssl rand -base64 64 | tr -d '\n')
+SECRET_KEY=$(openssl rand -base64 64)
+GRAFANA_PASSWORD=$(openssl rand -base64 24)
+MINIO_ROOT_PASSWORD=$(openssl rand -base64 32)
+BACKUP_ENCRYPTION_KEY=$(openssl rand -base64 32)
+EOF
+
+# Execute to generate
+bash /tmp/passwords.txt
+
+# Edit with generated values
+nano .env.production
+```
+
+### 4.3 Required .env.production Settings
+```
+ENVIRONMENT=production
+DEBUG=false
+
+# Database
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+POSTGRES_DB=trading_db
+POSTGRES_USER=trading_user
+POSTGRES_PASSWORD=[GENERATED]
+
+# Redis
+REDIS_HOST=redis
+REDIS_PASSWORD=[GENERATED]
+
+# Security
+JWT_SECRET=[GENERATED]
+SECRET_KEY=[GENERATED]
+
+# Monitoring
+GRAFANA_PASSWORD=[GENERATED]
+
+# Domain
+DOMAIN_NAME=trading.main-nilante.com
+LETSENCRYPT_EMAIL=admin@main-nilante.com
+
+# AI (Local)
+OLLAMA_HOST=http://host.docker.internal:11434
+USE_LOCAL_MODELS_ONLY=true
+```
+
+---
+
+## 🔒 PHASE 5: SSL & NETWORKING (5 min)
+
+### 5.1 Quick SSL Setup
+```bash
+# Self-signed for immediate deployment
+sudo ./scripts/setup_ssl_certificates.sh --self-signed --domain trading.main-nilante.com
+
+# Firewall
+sudo ufw allow 22,80,443,8000/tcp
+sudo ufw --force enable
+```
+
+### 5.2 Domain Configuration (if DNS ready)
+```bash
+./scripts/configure_domain.sh --domain main-nilante.com --subdomain trading --check-dns
+```
+
+---
+
+## 🚀 PHASE 6: LAUNCH (10 min)
+
+### 6.1 Deploy
+```bash
+cd /srv/trading
+
+# Option A: Automated deployment
+./deploy_production.sh --skip-tests
+
+# Option B: Manual deployment
+docker-compose down -v  # Clean start
+docker-compose build
+docker-compose up -d postgres redis
+sleep 30
+docker-compose up -d
+```
+
+### 6.2 Quick Verification
+```bash
+# Check services
+docker-compose ps
+
+# Test endpoints
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
+curl http://localhost:8000/metrics | head -5
+
+# Check logs
+docker-compose logs --tail=50 api
+```
+
+---
+
+## ✅ PHASE 7: VALIDATION (5 min)
+
+### 7.1 Health Checks
+```bash
+# Service status
+echo "=== Service Health ==="
+for service in api postgres redis; do
+    STATUS=$(docker-compose ps $service | grep Up && echo "✓" || echo "✗")
+    echo "$service: $STATUS"
+done
+
+# API endpoints
+echo "=== API Health ==="
+curl -s http://localhost:8000/health | jq -r '.status'
+curl -s http://localhost:8000/ready | jq -r '.ready'
+```
+
+### 7.2 Database Check
+```bash
+# PostgreSQL
+docker-compose exec postgres pg_isready
+
+# Redis
+docker-compose exec redis redis-cli ping
+```
+
+### 7.3 AI Model Test
+```bash
+# Test Ollama
+curl -X POST http://localhost:8000/api/v1/ai/test \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"test"}'
+```
+
+---
+
+## 🎯 PHASE 8: GO LIVE
+
+### 8.1 Production Configuration
+```bash
+# Enable production mode
+docker-compose -f docker-compose.yml \
+  -f infrastructure/docker/docker-compose.production.yml up -d
+
+# Setup backups
+sudo ./scripts/setup_backup_cron.sh
+
+# Configure monitoring
+./scripts/setup_monitoring_alerts.sh --email admin@main-nilante.com
+```
+
+### 8.2 Access Points
+- **API**: https://trading.main-nilante.com
+- **Docs**: https://trading.main-nilante.com/docs
+- **Grafana**: https://trading.main-nilante.com/grafana
+- **Health**: https://trading.main-nilante.com/health
+
+---
+
+## 🔥 QUICK FIXES
+
+### Container Issues
+```bash
+docker-compose restart [service]
+docker-compose logs --tail=100 [service]
+```
+
+### Database Reset
+```bash
+docker-compose down -v postgres
+docker-compose up -d postgres
+```
+
+### Memory Issues
+```bash
+docker system prune -af
+docker-compose down && docker-compose up -d
+```
+
+### Ollama Issues
+```bash
+sudo systemctl restart ollama
+ollama list
+```
+
+---
+
+## ✅ SUCCESS CRITERIA
+- [ ] All containers running: `docker-compose ps`
+- [ ] Health endpoint returns 200: `curl http://localhost:8000/health`
+- [ ] No errors in last 100 log lines: `docker-compose logs --tail=100`
+- [ ] Database connected: `docker-compose exec postgres pg_isready`
+- [ ] Redis responding: `docker-compose exec redis redis-cli ping`
+- [ ] AI models loaded: `ollama list` (shows 5 models)
+
+---
+
+## 📱 MONITORING
+```bash
+# Real-time logs
+docker-compose logs -f api
+
+# System metrics
+docker stats
+
+# Service health
+watch -n 5 'docker-compose ps'
+```
+
+---
+
+## 🚨 EMERGENCY ROLLBACK
+```bash
+# Complete rollback
+cd /srv/trading
+docker-compose down -v
+git checkout HEAD~1
+docker-compose up -d
+```
+
+---
+
+**DEPLOYMENT TIME: 45 minutes** ⏱️
+
+Start with **PHASE 1** now! The system will be live in less than an hour.

@@ -1,14 +1,29 @@
-# Deployment Manifest - authoritative list of files/dirs to include in release package
-# Comment lines and blank lines ignored.
-# Directories (recursive)
+# Deployment Manifest - Files and directories to include in production release
+# Comments (#) and blank lines are ignored
+# Directories end with / and are included recursively
+
+# Core Application
 api/
 services/
 shared/
+
+# Configuration
 config/
+infrastructure/
+
+# Database & Migrations
 migrations/
-scripts/runtime/
-# Root files
 alembic.ini
+
+# Deployment Scripts
+scripts/
+deploy_production.sh
+
+# Docker Configuration
 Dockerfile
-requirements.txt
 docker-compose.yml
+requirements.txt
+
+# Documentation (essential only)
+DEPLOYMENT.md
+.env.example
