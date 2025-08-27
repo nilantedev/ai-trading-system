@@ -137,8 +137,9 @@ An enterprise-grade, AI-powered options trading system with comprehensive securi
 
 3. **Initialize System**
    ```bash
-   # Install dependencies and setup databases
-   make init-production
+   # Install Python dependencies
+   pip install -r requirements.txt
+   # Or use: make init (creates venv and installs deps)
    
    # Run database migrations
    make migrate

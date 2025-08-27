@@ -19,9 +19,14 @@ git clone https://github.com/nilantedev/ai-trading-system.git /srv/trading
 cd /srv/trading
 cp .env.example .env.production
 # [Edit .env.production with secure values]
+pip install -r requirements.txt  # Install dependencies
 ./deploy_production.sh --skip-tests
 
-# 3. Verify
+# 3. Setup AI models (optional but recommended)
+cd infrastructure/ai-models
+./ollama-setup.sh --production  # Downloads production AI models
+
+# 4. Verify
 curl http://localhost:8000/health
 ```
 
