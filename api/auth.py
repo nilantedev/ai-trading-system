@@ -1,452 +1,572 @@
 #!/usr/bin/env python3
 """
-JWT Authentication Module for AI Trading System API
-Provides secure JWT token generation, validation, and user management.
+Consolidated JWT Authentication Module for AI Trading System
+Combines JWT rotation, revocation, and security features from multiple modules
 """
 
 import os
+import jwt
+import json
+import time
+import uuid
 import secrets
-import sys
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
-from fastapi import HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel
-from enum import Enum
-import logging
 import hashlib
 import hmac
-from collections import defaultdict
 import asyncio
+import aioredis
+from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from enum import Enum
+from fastapi import HTTPException, Depends, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from passlib.context import CryptContext
+from pydantic import BaseModel
+import logging
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+logger = logging.getLogger(__name__)
 
-from trading_common import get_settings
-from shared.logging_config import get_logger
-from trading_common.security_store import (
-    get_security_store, log_security_event, SecurityEventType,
-    UserSession, RefreshToken
-)
-from trading_common.user_management import get_user_manager, UserRole as UserMgmtRole, UserStatus as UserMgmtStatus
-
-logger = get_logger(__name__)
-settings = get_settings()
-
-# Security configuration
-security = HTTPBearer()
+# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Brute force protection - now using persistent store
-MAX_LOGIN_ATTEMPTS = 5
-LOCKOUT_DURATION = 300  # 5 minutes in seconds
-
-# JWT configuration - use unified settings
-JWT_SECRET_KEY = settings.security.secret_key
-JWT_ALGORITHM = settings.security.jwt_algorithm
-JWT_EXPIRY_MINUTES = settings.security.jwt_expire_minutes
-
-# Legacy environment variable support with deprecation warning
-if os.getenv("JWT_SECRET_KEY") and os.getenv("JWT_SECRET_KEY") != settings.security.secret_key:
-    logger.warning("Legacy JWT_SECRET_KEY detected. Please use SECURITY_SECRET_KEY instead.")
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-
-# Production validation
-if settings.is_production and len(JWT_SECRET_KEY) < 32:
-    logger.error("CRITICAL: JWT secret key must be at least 32 characters in production!")
-    raise ValueError("Production deployment requires secure secret key")
-
-# Initialize user manager for persistent authentication
-user_manager = get_user_manager()
+# Security schemes
+security = HTTPBearer()
 
 
 class UserRole(str, Enum):
-    """User roles for permission management."""
-    SUPER_ADMIN = "super_admin"
+    """User roles for the trading system"""
     ADMIN = "admin"
     TRADER = "trader"
     ANALYST = "analyst"
-    API_USER = "api_user"
     VIEWER = "viewer"
+    SERVICE = "service"
+
+
+class TokenType(Enum):
+    """Token types"""
+    ACCESS = "access"
+    REFRESH = "refresh"
+    API_KEY = "api_key"
+    SERVICE = "service"
+
+
+@dataclass
+class JWTKey:
+    """JWT signing key with metadata"""
+    kid: str                # Key ID
+    secret: str             # Signing secret
+    algorithm: str          # Signing algorithm
+    created_at: datetime    # Creation timestamp
+    expires_at: datetime    # Expiration timestamp
+    is_active: bool        # Whether key can sign new tokens
+    is_valid: bool         # Whether key can verify tokens
+    rotation_version: int   # Rotation generation
 
 
 class User(BaseModel):
-    """User model with permissions."""
+    """User model"""
     user_id: str
     username: str
-    email: str
-    role: UserRole
-    permissions: List[str]
-    is_active: bool = True
-    created_at: datetime
-    updated_at: datetime
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: bool = False
+    roles: List[str] = []
+    api_key_id: Optional[str] = None
     last_login: Optional[datetime] = None
+    mfa_enabled: bool = False
 
 
 class TokenData(BaseModel):
-    """JWT token payload data."""
-    user_id: str
-    username: str
-    role: str
-    permissions: List[str]
-    exp: datetime
-    iat: datetime
-    iss: str = "ai-trading-system"
-    aud: str = "trading-api"
-    jti: Optional[str] = None  # JWT ID for token revocation
+    """Token data model"""
+    username: Optional[str] = None
+    user_id: Optional[str] = None
+    scopes: List[str] = []
+    jti: Optional[str] = None
+    token_type: str = "access"
 
 
-# Token storage now handled by persistent security store
-# revoked_tokens and refresh_tokens replaced with Redis-backed store
-
-# User authentication now handled by persistent user management system
-# No more in-memory SYSTEM_USERS dictionary
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plaintext password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password: str) -> str:
-    """Generate password hash."""
-    return pwd_context.hash(password)
-
-
-async def check_brute_force(username: str) -> bool:
-    """Check if account is locked due to brute force attempts using persistent store."""
-    try:
-        security_store = await get_security_store()
-        is_locked = await security_store.is_account_locked(username, MAX_LOGIN_ATTEMPTS)
+class JWTAuthManager:
+    """
+    Unified JWT authentication manager with key rotation and revocation
+    """
+    
+    def __init__(self):
+        # Redis connection
+        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        self.redis_password = os.getenv("REDIS_PASSWORD")
+        self.redis: Optional[aioredis.Redis] = None
         
-        if is_locked:
-            logger.warning(f"Account {username} is locked due to excessive failed login attempts")
+        # JWT configuration
+        self.issuer = os.getenv("JWT_ISSUER", "ai-trading-system")
+        self.audience = os.getenv("JWT_AUDIENCE", "trading-api")
+        self.access_token_expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+        self.refresh_token_expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+        
+        # Key rotation settings
+        self.key_rotation_days = int(os.getenv("JWT_KEY_ROTATION_DAYS", "30"))
+        self.key_overlap_hours = int(os.getenv("JWT_KEY_OVERLAP_HOURS", "24"))
+        
+        # Security settings
+        self.max_failed_attempts = 5
+        self.lockout_duration_minutes = 15
+        self.require_mfa_for_sensitive = os.getenv("REQUIRE_MFA_SENSITIVE", "true").lower() == "true"
+        
+        # Key storage
+        self.keys: Dict[str, JWTKey] = {}
+        self.active_key: Optional[JWTKey] = None
+        
+        # Revocation tracking
+        self.revoked_tokens: set = set()
+        
+        # Brute force protection
+        self.failed_attempts: Dict[str, List[datetime]] = {}
+        
+        # Initialize default key if needed
+        self._init_default_key()
+    
+    def _init_default_key(self):
+        """Initialize a default key if none exists"""
+        if not self.active_key:
+            kid = f"key-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+            secret = os.getenv("JWT_SECRET", secrets.token_urlsafe(64))
             
-            # Log security event for account lockout
-            await log_security_event(
-                event_type=SecurityEventType.ACCOUNT_LOCKED,
-                success=False,
-                username=username,
-                details={"max_attempts": MAX_LOGIN_ATTEMPTS, "lockout_duration": LOCKOUT_DURATION},
-                severity="WARNING"
+            self.active_key = JWTKey(
+                kid=kid,
+                secret=secret,
+                algorithm="HS256",
+                created_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=self.key_rotation_days),
+                is_active=True,
+                is_valid=True,
+                rotation_version=1
+            )
+            self.keys[kid] = self.active_key
+    
+    async def initialize(self):
+        """Initialize Redis connection and load keys"""
+        try:
+            self.redis = aioredis.from_url(
+                self.redis_url,
+                password=self.redis_password,
+                decode_responses=True
+            )
+            await self.redis.ping()
+            logger.info("JWT Auth Manager initialized with Redis")
+            
+            # Load existing keys from Redis
+            await self._load_keys_from_redis()
+            
+            # Start key rotation scheduler
+            asyncio.create_task(self._key_rotation_scheduler())
+            
+        except Exception as e:
+            logger.warning(f"Redis not available, using in-memory storage: {e}")
+    
+    async def create_access_token(
+        self,
+        data: dict,
+        expires_delta: Optional[timedelta] = None
+    ) -> str:
+        """Create an access token"""
+        if not self.active_key:
+            raise RuntimeError("No active JWT key available")
+        
+        to_encode = data.copy()
+        
+        if expires_delta:
+            expire = datetime.now(timezone.utc) + expires_delta
+        else:
+            expire = datetime.now(timezone.utc) + timedelta(minutes=self.access_token_expire_minutes)
+        
+        to_encode.update({
+            "exp": expire,
+            "iat": datetime.now(timezone.utc),
+            "iss": self.issuer,
+            "aud": self.audience,
+            "jti": str(uuid.uuid4()),
+            "type": TokenType.ACCESS.value,
+            "kid": self.active_key.kid
+        })
+        
+        encoded_jwt = jwt.encode(
+            to_encode,
+            self.active_key.secret,
+            algorithm=self.active_key.algorithm,
+            headers={"kid": self.active_key.kid}
+        )
+        
+        return encoded_jwt
+    
+    async def create_refresh_token(
+        self,
+        data: dict,
+        expires_delta: Optional[timedelta] = None
+    ) -> str:
+        """Create a refresh token"""
+        if not self.active_key:
+            raise RuntimeError("No active JWT key available")
+        
+        to_encode = data.copy()
+        
+        if expires_delta:
+            expire = datetime.now(timezone.utc) + expires_delta
+        else:
+            expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_token_expire_days)
+        
+        to_encode.update({
+            "exp": expire,
+            "iat": datetime.now(timezone.utc),
+            "iss": self.issuer,
+            "aud": self.audience,
+            "jti": str(uuid.uuid4()),
+            "type": TokenType.REFRESH.value,
+            "kid": self.active_key.kid
+        })
+        
+        # Store refresh token in Redis if available
+        if self.redis:
+            jti = to_encode["jti"]
+            user_id = data.get("sub", "unknown")
+            await self.redis.setex(
+                f"refresh_token:{jti}",
+                int((expire - datetime.now(timezone.utc)).total_seconds()),
+                user_id
             )
         
-        return is_locked
-    except Exception as e:
-        logger.error(f"Error checking brute force protection: {e}")
-        # Fail open to avoid blocking legitimate users due to store issues
+        encoded_jwt = jwt.encode(
+            to_encode,
+            self.active_key.secret,
+            algorithm=self.active_key.algorithm,
+            headers={"kid": self.active_key.kid}
+        )
+        
+        return encoded_jwt
+    
+    async def verify_token(
+        self,
+        token: str,
+        token_type: Optional[TokenType] = None
+    ) -> Dict[str, Any]:
+        """Verify a JWT token"""
+        try:
+            # Get kid from header
+            header = jwt.get_unverified_header(token)
+            kid = header.get("kid")
+            
+            # Find appropriate key
+            if kid and kid in self.keys:
+                key = self.keys[kid]
+                if not key.is_valid:
+                    raise jwt.InvalidKeyError(f"Key {kid} is no longer valid")
+            else:
+                key = self.active_key
+                if not key:
+                    raise jwt.InvalidKeyError("No active key available")
+            
+            # Decode token
+            payload = jwt.decode(
+                token,
+                key.secret,
+                algorithms=[key.algorithm],
+                audience=self.audience,
+                issuer=self.issuer
+            )
+            
+            # Check if token is revoked
+            jti = payload.get("jti")
+            if jti and await self.is_token_revoked(jti):
+                raise jwt.InvalidTokenError("Token has been revoked")
+            
+            # Verify token type
+            if token_type and payload.get("type") != token_type.value:
+                raise jwt.InvalidTokenError(f"Invalid token type")
+            
+            return payload
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except jwt.InvalidTokenError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid token: {str(e)}"
+            )
+    
+    async def revoke_token(self, token: str) -> bool:
+        """Revoke a token"""
+        try:
+            # Decode without verification to get JTI
+            payload = jwt.decode(
+                token,
+                options={"verify_signature": False}
+            )
+            
+            jti = payload.get("jti")
+            if not jti:
+                return False
+            
+            # Add to revoked set
+            self.revoked_tokens.add(jti)
+            
+            # Store in Redis
+            if self.redis:
+                exp = payload.get("exp", 0)
+                ttl = max(0, exp - time.time()) if exp else 3600
+                await self.redis.setex(
+                    f"revoked_token:{jti}",
+                    int(ttl),
+                    "1"
+                )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to revoke token: {e}")
+            return False
+    
+    async def is_token_revoked(self, jti: str) -> bool:
+        """Check if a token is revoked"""
+        if jti in self.revoked_tokens:
+            return True
+        
+        if self.redis:
+            try:
+                result = await self.redis.get(f"revoked_token:{jti}")
+                return result == "1"
+            except Exception:
+                pass
+        
         return False
-
-async def record_failed_login(username: str, ip_address: Optional[str] = None):
-    """Record a failed login attempt using persistent store."""
-    try:
-        security_store = await get_security_store()
-        attempt_count = await security_store.record_login_attempt(username, False, ip_address or "unknown")
-        
-        logger.warning(f"Failed login attempt for {username}. Total recent attempts: {attempt_count}")
-        
-        # Log security event for failed login
-        await log_security_event(
-            event_type=SecurityEventType.LOGIN_FAILURE,
-            success=False,
-            username=username,
-            ip_address=ip_address,
-            details={"attempt_count": attempt_count},
-            severity="WARNING" if attempt_count >= MAX_LOGIN_ATTEMPTS - 1 else "INFO"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error recording failed login attempt: {e}")
-
-async def record_successful_login(username: str, ip_address: Optional[str] = None):
-    """Record a successful login attempt using persistent store."""
-    try:
-        security_store = await get_security_store()
-        await security_store.record_login_attempt(username, True, ip_address or "unknown")
-        
-        # Log security event for successful login
-        await log_security_event(
-            event_type=SecurityEventType.LOGIN_SUCCESS,
-            success=True,
-            username=username,
-            ip_address=ip_address,
-            details={},
-            severity="INFO"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error recording successful login attempt: {e}")
-
-async def authenticate_user(username: str, password: str, ip_address: Optional[str] = None) -> Optional[User]:
-    """Authenticate user with username and password using persistent user management."""
-    try:
-        # Use the user manager for authentication
-        user_mgmt_user = await user_manager.authenticate_user(username, password, ip_address)
-        
-        if not user_mgmt_user:
-            return None
-        
-        # Convert user management User to API User model
-        api_user = User(
-            user_id=user_mgmt_user.user_id,
-            username=user_mgmt_user.username,
-            email=user_mgmt_user.email,
-            role=UserRole(user_mgmt_user.role.value),
-            permissions=list(user_mgmt_user.permissions),
-            is_active=user_mgmt_user.status.value == "active",
-            created_at=user_mgmt_user.created_at,
-            updated_at=user_mgmt_user.updated_at,
-            last_login=user_mgmt_user.last_login
-        )
-        
-        return api_user
-        
-    except Exception as e:
-        logger.error(f"Authentication error for user {username}: {e}")
-        return None
-
-
-def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token for user."""
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRY_MINUTES)
     
-    # Add unique token ID for revocation
-    token_id = secrets.token_urlsafe(32)
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """Verify a password against its hash"""
+        return pwd_context.verify(plain_password, hashed_password)
     
-    iat_time = datetime.utcnow()
+    def get_password_hash(self, password: str) -> str:
+        """Hash a password"""
+        return pwd_context.hash(password)
     
-    # Create payload with Unix timestamps for exp and iat
-    payload = {
-        "user_id": user.user_id,
-        "username": user.username, 
-        "role": user.role.value,
-        "permissions": user.permissions,
-        "exp": int(expire.timestamp()),  # Convert to Unix timestamp
-        "iat": int(iat_time.timestamp()),  # Convert to Unix timestamp
-        "iss": "ai-trading-system",
-        "aud": "trading-api",
-        "jti": token_id
-    }
-    
-    return jwt.encode(
-        payload,
-        JWT_SECRET_KEY,
-        algorithm=JWT_ALGORITHM
-    )
-
-async def create_refresh_token(user: User) -> str:
-    """Create refresh token for user using persistent store."""
-    return await store_refresh_token(user)
-
-async def store_refresh_token(user: User) -> str:
-    """Store refresh token in persistent security store."""
-    token = secrets.token_urlsafe(64)
-    security_store = await get_security_store()
-    
-    token_data = RefreshToken(
-        token_hash="",  # Will be generated by security store
-        user_id=user.user_id,
-        username=user.username,
-        created_at=datetime.utcnow(),
-        expires_at=datetime.utcnow() + timedelta(days=30)
-    )
-    
-    await security_store.store_refresh_token(token, token_data)
-    return token
-
-async def refresh_access_token(refresh_token: str) -> Optional[Tuple[str, str]]:
-    """Refresh access token using persistent store."""
-    try:
-        security_store = await get_security_store()
-        token_data = await security_store.get_refresh_token(refresh_token)
+    async def check_brute_force(self, identifier: str) -> bool:
+        """Check if an account is locked due to brute force attempts"""
+        if self.redis:
+            try:
+                attempts = await self.redis.get(f"failed_attempts:{identifier}")
+                if attempts and int(attempts) >= self.max_failed_attempts:
+                    return True
+            except Exception:
+                pass
+        else:
+            # In-memory fallback
+            if identifier in self.failed_attempts:
+                recent_attempts = [
+                    dt for dt in self.failed_attempts[identifier]
+                    if (datetime.now(timezone.utc) - dt).total_seconds() < self.lockout_duration_minutes * 60
+                ]
+                if len(recent_attempts) >= self.max_failed_attempts:
+                    return True
         
-        if not token_data or token_data.is_revoked:
-            return None
+        return False
+    
+    async def record_failed_attempt(self, identifier: str):
+        """Record a failed login attempt"""
+        if self.redis:
+            try:
+                key = f"failed_attempts:{identifier}"
+                await self.redis.incr(key)
+                await self.redis.expire(key, self.lockout_duration_minutes * 60)
+            except Exception:
+                pass
+        else:
+            # In-memory fallback
+            if identifier not in self.failed_attempts:
+                self.failed_attempts[identifier] = []
+            self.failed_attempts[identifier].append(datetime.now(timezone.utc))
+    
+    async def clear_failed_attempts(self, identifier: str):
+        """Clear failed attempts after successful login"""
+        if self.redis:
+            try:
+                await self.redis.delete(f"failed_attempts:{identifier}")
+            except Exception:
+                pass
+        else:
+            if identifier in self.failed_attempts:
+                del self.failed_attempts[identifier]
+    
+    async def rotate_keys(self) -> JWTKey:
+        """Rotate JWT signing keys"""
+        # Generate new key
+        new_kid = f"key-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+        new_secret = secrets.token_urlsafe(64)
         
-        # Check if token is expired
-        if token_data.expires_at < datetime.utcnow():
-            return None
-        
-        # Get user from user manager
-        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
-        if not user_mgmt_user or user_mgmt_user.status.value != "active":
-            return None
-        
-        # Convert to API User model
-        api_user = User(
-            user_id=user_mgmt_user.user_id,
-            username=user_mgmt_user.username,
-            email=user_mgmt_user.email,
-            role=UserRole(user_mgmt_user.role.value),
-            permissions=list(user_mgmt_user.permissions),
+        new_key = JWTKey(
+            kid=new_kid,
+            secret=new_secret,
+            algorithm="HS256",
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=self.key_rotation_days),
             is_active=True,
-            created_at=user_mgmt_user.created_at,
-            updated_at=user_mgmt_user.updated_at,
-            last_login=user_mgmt_user.last_login
+            is_valid=True,
+            rotation_version=len(self.keys) + 1
         )
         
-        # Create new access token
-        new_access_token = create_access_token(api_user)
+        # Deactivate old key
+        if self.active_key:
+            self.active_key.is_active = False
+            # Schedule invalidation
+            asyncio.create_task(
+                self._schedule_key_invalidation(
+                    self.active_key.kid,
+                    self.key_overlap_hours
+                )
+            )
         
-        # Rotate refresh token (remove old, create new)
-        await security_store.revoke_refresh_token(refresh_token)
-        new_refresh_token = await store_refresh_token(api_user)
+        # Set new active key
+        self.keys[new_kid] = new_key
+        self.active_key = new_key
         
-        # Log security event
-        await log_security_event(
-            event_type=SecurityEventType.TOKEN_REFRESH,
-            success=True,
-            user_id=api_user.user_id,
-            username=api_user.username
+        # Save to Redis
+        if self.redis:
+            await self._save_key_to_redis(new_key)
+        
+        logger.info(f"JWT key rotated: {new_kid}")
+        return new_key
+    
+    async def _schedule_key_invalidation(self, kid: str, hours: int):
+        """Schedule key invalidation after overlap period"""
+        await asyncio.sleep(hours * 3600)
+        if kid in self.keys:
+            self.keys[kid].is_valid = False
+            logger.info(f"JWT key {kid} invalidated")
+    
+    async def _key_rotation_scheduler(self):
+        """Background task for key rotation"""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # Check hourly
+                
+                if self.active_key:
+                    time_until_expiry = (
+                        self.active_key.expires_at - datetime.now(timezone.utc)
+                    ).total_seconds()
+                    
+                    # Rotate if less than 25% lifetime remaining
+                    if time_until_expiry < (self.key_rotation_days * 86400 * 0.25):
+                        await self.rotate_keys()
+                        
+            except Exception as e:
+                logger.error(f"Key rotation scheduler error: {e}")
+    
+    async def _load_keys_from_redis(self):
+        """Load JWT keys from Redis"""
+        if not self.redis:
+            return
+        
+        try:
+            keys = await self.redis.keys("jwt:key:*")
+            for key_name in keys:
+                key_data = await self.redis.get(key_name)
+                if key_data:
+                    data = json.loads(key_data)
+                    kid = data["kid"]
+                    
+                    self.keys[kid] = JWTKey(
+                        kid=kid,
+                        secret=data["secret"],
+                        algorithm=data["algorithm"],
+                        created_at=datetime.fromisoformat(data["created_at"]),
+                        expires_at=datetime.fromisoformat(data["expires_at"]),
+                        is_active=data["is_active"],
+                        is_valid=data["is_valid"],
+                        rotation_version=data["rotation_version"]
+                    )
+                    
+                    if data["is_active"]:
+                        self.active_key = self.keys[kid]
+                        
+        except Exception as e:
+            logger.error(f"Failed to load keys from Redis: {e}")
+    
+    async def _save_key_to_redis(self, key: JWTKey):
+        """Save JWT key to Redis"""
+        if not self.redis:
+            return
+        
+        try:
+            key_data = {
+                "kid": key.kid,
+                "secret": key.secret,
+                "algorithm": key.algorithm,
+                "created_at": key.created_at.isoformat(),
+                "expires_at": key.expires_at.isoformat(),
+                "is_active": key.is_active,
+                "is_valid": key.is_valid,
+                "rotation_version": key.rotation_version
+            }
+            
+            ttl = int((key.expires_at - datetime.now(timezone.utc)).total_seconds())
+            await self.redis.setex(
+                f"jwt:key:{key.kid}",
+                max(ttl, 86400),
+                json.dumps(key_data)
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to save key to Redis: {e}")
+
+
+# Global instance
+_auth_manager: Optional[JWTAuthManager] = None
+
+
+async def get_auth_manager() -> JWTAuthManager:
+    """Get or create auth manager instance"""
+    global _auth_manager
+    if _auth_manager is None:
+        _auth_manager = JWTAuthManager()
+        await _auth_manager.initialize()
+    return _auth_manager
+
+
+# FastAPI Dependencies
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> User:
+    """Get current user from token"""
+    auth_manager = await get_auth_manager()
+    
+    try:
+        payload = await auth_manager.verify_token(
+            credentials.credentials,
+            token_type=TokenType.ACCESS
         )
         
-        return new_access_token, new_refresh_token
+        # Create user object from token
+        user = User(
+            user_id=payload.get("sub", ""),
+            username=payload.get("username", ""),
+            email=payload.get("email"),
+            roles=payload.get("roles", [])
+        )
         
+        return user
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error refreshing token: {e}")
-        return None
-
-async def revoke_token(token: str):
-    """Revoke an access token using persistent store."""
-    try:
-        payload = jwt.decode(
-            token, 
-            JWT_SECRET_KEY, 
-            algorithms=[JWT_ALGORITHM],
-            audience="trading-api",
-            issuer="ai-trading-system"
-        )
-        jti = payload.get("jti")
-        exp = payload.get("exp")
-        
-        if jti and exp:
-            expires_at = datetime.fromtimestamp(exp)
-            security_store = await get_security_store()
-            await security_store.revoke_token(jti, expires_at)
-            
-            # Log security event
-            await log_security_event(
-                event_type=SecurityEventType.TOKEN_REVOKED,
-                success=True,
-                user_id=payload.get("user_id"),
-                username=payload.get("username"),
-                details={"token_jti": jti}
-            )
-            
-            logger.info(f"Token {jti} revoked")
-    except JWTError as e:
-        logger.warning(f"Failed to revoke token: {e}")
-
-
-async def verify_access_token(token: str) -> TokenData:
-    """Verify and decode JWT access token using persistent store."""
-    try:
-        payload = jwt.decode(
-            token, 
-            JWT_SECRET_KEY, 
-            algorithms=[JWT_ALGORITHM],
-            audience="trading-api",
-            issuer="ai-trading-system"
-        )
-        
-        # Check if token is revoked using persistent store
-        jti = payload.get("jti")
-        if jti:
-            security_store = await get_security_store()
-            if await security_store.is_token_revoked(jti):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has been revoked"
-                )
-        
-        # Validate required fields
-        user_id = payload.get("user_id")
-        username = payload.get("username")
-        
-        if not user_id or not username:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload"
-            )
-        
-        # Check expiry - exp is in seconds since epoch
-        exp = payload.get("exp")
-        if exp:
-            # Convert exp to datetime for comparison
-            exp_datetime = datetime.fromtimestamp(exp)
-            current_time = datetime.utcnow()
-            if exp_datetime < current_time:
-                logger.debug(f"Token expired: exp={exp_datetime}, current={current_time}")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token expired"
-                )
-        
-        # Validate issuer/audience
-        iss = payload.get("iss", "")
-        aud = payload.get("aud", "")
-        if iss != "ai-trading-system" or aud != "trading-api":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token issuer or audience"
-            )
-        
-        return TokenData(**payload)
-        
-    except JWTError as e:
-        logger.warning(f"JWT validation error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials"
         )
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
-    """Get current authenticated user from JWT token."""
-    try:
-        token_data = await verify_access_token(credentials.credentials)
-        
-        # Get user from user manager
-        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
-        if not user_mgmt_user or user_mgmt_user.status.value != "active":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found or inactive"
-            )
-        
-        # Convert to API User model
-        api_user = User(
-            user_id=user_mgmt_user.user_id,
-            username=user_mgmt_user.username,
-            email=user_mgmt_user.email,
-            role=UserRole(user_mgmt_user.role.value),
-            permissions=list(user_mgmt_user.permissions),
-            is_active=True,
-            created_at=user_mgmt_user.created_at,
-            updated_at=user_mgmt_user.updated_at,
-            last_login=user_mgmt_user.last_login
-        )
-        
-        return api_user
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting current user: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed"
-        )
-
-
-async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
-    """Get current active user."""
-    if not current_user.is_active:
+async def get_current_active_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Get current active user"""
+    if current_user.disabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Inactive user"
@@ -454,87 +574,26 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     return current_user
 
 
-async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[User]:
-    """Get optional user from JWT token - returns None if no token or invalid."""
+async def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+) -> Optional[User]:
+    """Get optional user (for endpoints that work with or without auth)"""
     if not credentials:
         return None
     
     try:
-        token_data = await verify_access_token(credentials.credentials)
-        
-        # Get user from user manager
-        user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
-        if not user_mgmt_user or user_mgmt_user.status.value != "active":
-            return None
-        
-        # Convert to API User model
-        api_user = User(
-            user_id=user_mgmt_user.user_id,
-            username=user_mgmt_user.username,
-            email=user_mgmt_user.email,
-            role=UserRole(user_mgmt_user.role.value),
-            permissions=list(user_mgmt_user.permissions),
-            is_active=True,
-            created_at=user_mgmt_user.created_at,
-            updated_at=user_mgmt_user.updated_at,
-            last_login=user_mgmt_user.last_login
-        )
-        
-        return api_user
-        
-    except (JWTError, HTTPException, ValueError, Exception):
+        return await get_current_user(credentials)
+    except HTTPException:
         return None
 
 
-def require_permission(permission: str):
-    """Dependency to require specific permission."""
-    async def permission_checker(current_user: User = Depends(get_current_active_user)):
-        if permission not in current_user.permissions and "admin:all" not in current_user.permissions:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required: {permission}"
-            )
-        return current_user
-    return permission_checker
-
-
-def require_role(role: UserRole):
-    """Dependency to require specific role."""
+def require_roles(*allowed_roles: str):
+    """Dependency to require specific roles"""
     async def role_checker(current_user: User = Depends(get_current_active_user)):
-        # Allow super admin and admin to access everything
-        if current_user.role in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
-            return current_user
-        
-        # Check specific role match
-        if current_user.role != role:
+        if not any(role in current_user.roles for role in allowed_roles):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required role: {role}, current: {current_user.role}"
+                detail="Insufficient permissions"
             )
         return current_user
     return role_checker
-
-
-
-
-# Health check for auth system
-async def get_auth_health() -> Dict[str, Any]:
-    """Get authentication system health status."""
-    try:
-        # Check user manager availability
-        user_manager_available = user_manager is not None and user_manager._session_factory is not None
-        
-        return {
-            "status": "healthy",
-            "jwt_configured": bool(JWT_SECRET_KEY and len(JWT_SECRET_KEY) >= 16),
-            "user_manager_available": user_manager_available,
-            "database_connected": user_manager_available,
-            "settings_loaded": settings is not None,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
