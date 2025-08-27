@@ -1,0 +1,14 @@
+# Deployment Manifest - authoritative list of files/dirs to include in release package
+# Comment lines and blank lines ignored.
+# Directories (recursive)
+api/
+services/
+shared/
+config/
+migrations/
+scripts/runtime/
+# Root files
+alembic.ini
+Dockerfile
+requirements.txt
+docker-compose.yml

@@ -59,8 +59,7 @@ class SecureConfig(BaseSettings):
     redis_pool_size: int = Field(default=10, description="Redis connection pool size")
     
     # API Keys - All loaded from secrets manager
-    openai_api_key: Optional[SecretStr] = Field(default=None, description="OpenAI API key")
-    anthropic_api_key: Optional[SecretStr] = Field(default=None, description="Anthropic API key")
+    # Removed OpenAI/Anthropic - using local Ollama models only
     alpaca_api_key: Optional[SecretStr] = Field(default=None, description="Alpaca API key")
     alpaca_secret: Optional[SecretStr] = Field(default=None, description="Alpaca secret")
     polygon_api_key: Optional[SecretStr] = Field(default=None, description="Polygon API key")
@@ -113,8 +112,7 @@ class SecureConfig(BaseSettings):
             "db_user": "database/user",
             "db_password": "database/password",
             "redis_password": "redis/password",
-            "openai_api_key": "api/openai_key",
-            "anthropic_api_key": "api/anthropic_key",
+            # Removed OpenAI/Anthropic - using local models
             "alpaca_api_key": "api/alpaca_key",
             "alpaca_secret": "api/alpaca_secret",
             "polygon_api_key": "api/polygon_key",
@@ -199,8 +197,7 @@ class SecureConfig(BaseSettings):
     def get_api_key(self, provider: str) -> Optional[str]:
         """Get API key for a provider."""
         key_map = {
-            "openai": self.openai_api_key,
-            "anthropic": self.anthropic_api_key,
+            # Removed OpenAI/Anthropic - using local models
             "alpaca": self.alpaca_api_key,
             "polygon": self.polygon_api_key,
             "binance": self.binance_api_key,
@@ -218,7 +215,7 @@ class SecureConfig(BaseSettings):
             sensitive_fields = [
                 "secret_key", "jwt_secret", "encryption_key",
                 "db_password", "redis_password",
-                "openai_api_key", "anthropic_api_key",
+                # Removed OpenAI/Anthropic
                 "alpaca_api_key", "alpaca_secret",
                 "polygon_api_key", "binance_api_key", "binance_secret",
                 "grafana_password", "prometheus_auth_token"

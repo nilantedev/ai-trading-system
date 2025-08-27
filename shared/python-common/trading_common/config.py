@@ -109,10 +109,11 @@ class MessageSettings(BaseSettings):
 
 
 class AISettings(BaseSettings):
-    """AI/ML configuration settings."""
+    """AI/ML configuration settings - Local models only."""
     
-    openai_api_key: Optional[str] = Field(default=None)
-    anthropic_api_key: Optional[str] = Field(default=None)
+    # Ollama configuration (local models only - no API costs)
+    ollama_host: str = Field(default="http://localhost:11434")
+    use_local_models_only: bool = Field(default=True)
     
     local_model_path: str = Field(default="/models")
     model_cache_size: str = Field(default="32GB")

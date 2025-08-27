@@ -14,7 +14,6 @@ services:
       - "${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-trading_user}"]
       interval: 30s
@@ -48,6 +47,14 @@ services:
       args:
         - BUILD_ENV=production
     container_name: trading-api
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    cap_add: []
     environment:
       # Database connections
       DATABASE_URL: postgresql+asyncpg://${DB_USER:?DB_USER required}:${DB_PASSWORD:?DB_PASSWORD required}@postgres:5432/${DB_NAME:?DB_NAME required}
@@ -87,6 +94,13 @@ services:
     networks:
       - trading-network
     restart: unless-stopped
+    # Additional resource limits for security & stability
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Prevent container from gaining additional privileges
+    privileged: false
     deploy:
       resources:
         limits:

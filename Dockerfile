@@ -44,7 +44,7 @@ COPY --chown=trading:trading api/ ./api/
 COPY --chown=trading:trading services/ ./services/
 COPY --chown=trading:trading shared/ ./shared/
 COPY --chown=trading:trading config/*.py ./config/
-COPY --chown=trading:trading scripts/init_db.sql ./scripts/
+COPY --chown=trading:trading config/logging.yaml ./config/logging.yaml
 COPY --chown=trading:trading requirements.txt ./
 
 # Security: Set restricted permissions

@@ -64,6 +64,13 @@ help:
 	@echo "  make clean-cache       Clean all caches"
 	@echo "  make clean-logs        Clean old logs"
 	@echo "  make optimize          Run optimization tasks"
+	@echo ""
+	@echo "📄 SBOM & Supply Chain:"
+	@echo "  make sbom              Generate SBOM (Syft if available + minimal fallback)"
+	@echo "  make sbom-verify       Quick check that SBOM files exist"
+	@echo ""
+	@echo "🧷 Pre-Production:"
+	@echo "  make preprod-verify    Run full pre-production verification (lint, tests, light security, sbom)"
 
 # Environment setup
 init: check-requirements create-venv install-deps setup-env
@@ -306,5 +313,28 @@ reset: clean
 	@rm -f .env .env.production
 	@echo "✅ System reset completed"
 	@echo "Run 'make init' to reinitialize"
+
+# SBOM generation
+sbom:
+	@echo "🧾 Generating SBOM..."
+	@$(VENV_PYTHON) scripts/generate_sbom.py
+	@echo "✅ SBOM artifacts in build_artifacts/sbom"
+
+sbom-verify:
+	@test -f build_artifacts/sbom/minimal-spdx.json || (echo "❌ minimal-spdx.json missing" && exit 1)
+	@echo "✅ SBOM files present"
+
+# Pre-production verification aggregate target
+preprod-verify: lint test-unit test-integration sbom-verify
+	@echo "🔐 Running light dependency vulnerability audit (non-blocking)..."
+	@$(VENV_PYTHON) -m pip-audit -r requirements.txt --progress-spinner off 2>/dev/null || echo "pip-audit issues (review above)"
+	@echo "🔍 Checking for obviously missing critical env vars in .env.production (non-blocking)..."
+	@grep -E '^(SECRET_KEY|JWT_SECRET|DB_USER|DB_PASSWORD|DB_NAME)=' .env.production >/dev/null 2>&1 && echo "✅ Core env vars present" || echo "⚠️ Core env vars missing (fill before production)"
+	@echo "🧪 Smoke building Docker image (no push)..."
+	@$(DOCKER) build -q -t ai-trading-system:preprod . >/dev/null && echo "✅ Docker build succeeded" || (echo "❌ Docker build failed" && exit 1)
+	@echo "🧾 Ensuring SBOM (regenerating minimal if absent)..."
+	@test -f build_artifacts/sbom/minimal-spdx.json || $(VENV_PYTHON) scripts/generate_sbom.py || true
+	@echo "📦 Image size (approx):" && $(DOCKER) images ai-trading-system:preprod --format '{{.Size}}'
+	@echo "✅ Pre-production verification complete"
 
 .DEFAULT_GOAL := help

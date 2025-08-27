@@ -92,6 +92,52 @@ rate_limit_blocks_total = Counter(
     registry=registry
 )
 
+# Degraded / fallback mode indicators
+rate_limiter_degraded = Gauge(
+    'rate_limiter_degraded',
+    'Rate limiter degraded mode active (1=yes,0=no)',
+    registry=registry
+)
+
+rate_limiter_fallback_requests_total = Counter(
+    'rate_limiter_fallback_requests_total',
+    'Total requests processed under degraded/fallback mode',
+    ['status'],
+    registry=registry
+)
+
+# Object Storage (MinIO) Metrics
+object_storage_operations_total = Counter(
+    'object_storage_operations_total',
+    'Total MinIO storage operations',
+    ['operation', 'status'],
+    registry=registry
+)
+
+object_storage_operation_duration_seconds = Histogram(
+    'object_storage_operation_duration_seconds',
+    'Latency of MinIO storage operations in seconds',
+    ['operation'],
+    buckets=[0.001,0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2,5],
+    registry=registry
+)
+
+# Vector Store (Weaviate) Metrics
+vector_store_operations_total = Counter(
+    'vector_store_operations_total',
+    'Total Weaviate operations',
+    ['operation', 'status'],
+    registry=registry
+)
+
+vector_store_operation_duration_seconds = Histogram(
+    'vector_store_operation_duration_seconds',
+    'Latency of Weaviate operations in seconds',
+    ['operation'],
+    buckets=[0.001,0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2,5],
+    registry=registry
+)
+
 # WebSocket Metrics
 websocket_connections_total = Counter(
     'websocket_connections_total',

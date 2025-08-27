@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -254,7 +255,7 @@ async def run_model_drift_scan(model_name: str, version: Optional[str] = None, l
         if order.index(r['severity']) > order.index(worst_severity):
             worst_severity = r['severity']
 
-    return {
+    summary = {
         'model_name': model_name,
         'version': entry.version,
         'features_evaluated': len(reports),
@@ -264,6 +265,22 @@ async def run_model_drift_scan(model_name: str, version: Optional[str] = None, l
         'live_period': {'start': live_start.isoformat(), 'end': live_end.isoformat()},
         'reports': reports,
     }
+    # Structured drift event emission (best-effort; no hard dependency on metrics)
+    try:  # pragma: no cover
+        from trading_common.event_logging import emit_event
+        emit_event(
+            event_type="model.drift.scan", 
+            model_name=model_name,
+            version=entry.version,
+            severity=worst_severity,
+            features=len(reports),
+            reference_window_days=reference_window_days,
+            live_window_days=live_window_days,
+            status=summary['status'] if 'status' in summary else 'completed'
+        )
+    except Exception:
+        pass
+    return summary
 
 __all__ = [
     'compute_feature_drift',

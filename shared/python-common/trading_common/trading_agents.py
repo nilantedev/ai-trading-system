@@ -1,12 +1,17 @@
-"""OpenAI Swarm-based trading agents for coordinated decision making."""
+"""Local AI agent orchestration for trading decisions using only free, local models.
+
+This replaces OpenAI Swarm with a local implementation that maintains
+the same sophisticated multi-agent coordination without any API costs.
+"""
 
 import json
 import logging
+import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
-from swarm import Swarm, Agent
+from .local_swarm import LocalSwarm, LocalAgent, create_trading_agents
 from .config import get_settings
 from .ai_models import get_model_router, ModelType
 
@@ -38,380 +43,356 @@ class TradingDecision:
 
 
 class TradingAgentOrchestrator:
-    """Coordinates multiple trading agents using OpenAI Swarm."""
+    """Coordinates multiple trading agents using local models only."""
     
     def __init__(self):
         self.settings = get_settings()
+        self.swarm = LocalSwarm()
+        self.agents = create_trading_agents()
         
-        # Initialize Swarm client if API key available
-        if self.settings.ai.openai_api_key:
-            self.client = Swarm()
-        else:
-            self.client = None
-            logger.info("OpenAI API key not available, using mock responses")
+        # Add all agents to swarm
+        for agent in self.agents.values():
+            self.swarm.add_agent(agent)
             
-        self.agents = self._create_agents()
+        logger.info("Trading Agent Orchestrator initialized with local models only")
+        self._log_model_configuration()
+    
+    def _log_model_configuration(self):
+        """Log the model configuration for transparency."""
+        logger.info("=== Local Model Configuration ===")
+        logger.info("All models run locally via Ollama - NO API COSTS")
+        logger.info("Models selected for optimal performance:")
+        logger.info("- Market Analysis: qwen2.5:72b (or mixtral:8x7b fallback)")
+        logger.info("- Risk Assessment: deepseek-r1:70b (or llama3.1:70b fallback)")
+        logger.info("- Strategy: llama3.1:70b (or mistral:7b fallback)")
+        logger.info("- Sentiment: phi3:medium (fast, efficient)")
+        logger.info("- Execution: mixtral:8x7b (fast decisions)")
+        logger.info("================================")
+    
+    async def make_trading_decision(self, context: TradingContext) -> TradingDecision:
+        """Coordinate agents to make a trading decision."""
         
-    def _create_agents(self):
-        """Create specialized trading agents."""
+        # Prepare context for agents
+        agent_context = {
+            "symbol": context.symbol,
+            "current_price": context.current_price,
+            "market_data": context.market_data,
+            "portfolio": context.portfolio_state,
+            "risk_metrics": context.risk_metrics,
+            "news_sentiment": context.news_sentiment
+        }
         
-        # Market Analysis Agent
-        market_analyst = Agent(
-            name="Market Analyst",
-            instructions="""
-            You are a senior market analyst specializing in technical and fundamental analysis.
-            
-            Your responsibilities:
-            - Analyze market data, price movements, and trading volumes
-            - Identify trends, support/resistance levels, and chart patterns
-            - Assess market sentiment and momentum indicators
-            - Provide clear, data-driven market insights
-            
-            Always provide:
-            1. Current market trend assessment
-            2. Key technical levels (support/resistance)
-            3. Volume analysis and momentum indicators
-            4. Market sentiment evaluation
-            5. Confidence level (0-100%) for your analysis
-            
-            Be concise but thorough. Focus on actionable insights.
-            """,
-            model="gpt-4o-mini"  # Use OpenAI for market analysis
+        # Prepare messages for agents
+        messages = [
+            {
+                "role": "user",
+                "content": f"""Analyze the following trading opportunity:
+                
+Symbol: {context.symbol}
+Current Price: ${context.current_price}
+Market Data: {json.dumps(context.market_data, indent=2)}
+Portfolio State: {json.dumps(context.portfolio_state, indent=2)}
+Risk Metrics: {json.dumps(context.risk_metrics, indent=2)}
+News Sentiment: {json.dumps(context.news_sentiment, indent=2) if context.news_sentiment else 'N/A'}
+
+Provide your analysis and recommendation (BUY/SELL/HOLD) with confidence percentage."""
+            }
+        ]
+        
+        # Run all agents in parallel for speed
+        result = await self.swarm.run_multiple(
+            list(self.agents.values()),
+            messages,
+            agent_context,
+            aggregation="consensus"
         )
         
-        # Risk Management Agent
-        risk_manager = Agent(
-            name="Risk Manager",
-            instructions="""
-            You are a conservative risk management specialist focused on capital preservation.
-            
-            Your responsibilities:
-            - Assess portfolio risk exposure and position sizing
-            - Calculate risk metrics (VaR, Sharpe ratio, drawdown)
-            - Set stop-loss and take-profit levels
-            - Monitor correlation risks and concentration limits
-            - Ensure compliance with risk management rules
-            
-            Always provide:
-            1. Risk assessment for proposed trades (1-10 risk score)
-            2. Recommended position size based on risk tolerance
-            3. Stop-loss and take-profit recommendations
-            4. Portfolio impact analysis
-            5. Risk-adjusted return expectations
-            
-            Never approve trades that violate risk limits. Be conservative.
-            """,
-            model="claude-3-haiku-20240307"  # Use Claude for risk analysis
-        )
+        # Extract decision from consensus
+        decision = self._parse_decision(result, context)
         
-        # Signal Generation Agent
-        signal_generator = Agent(
-            name="Signal Generator",
-            instructions="""
-            You are a quantitative trading signal generator using advanced algorithms.
-            
-            Your responsibilities:
-            - Generate buy/sell/hold signals based on multiple indicators
-            - Combine technical analysis with sentiment data
-            - Time entry and exit points for optimal execution
-            - Assess signal strength and probability of success
-            
-            Always provide:
-            1. Clear trading signal (BUY/SELL/HOLD)
-            2. Signal strength (1-100%)
-            3. Entry price target and timing
-            4. Expected price movement and timeframe
-            5. Supporting technical indicators
-            
-            Be decisive but realistic. Explain your signal logic clearly.
-            """,
-            model="gpt-4o-mini"  # Use OpenAI for signal generation
-        )
+        return decision
+    
+    def _parse_decision(self, result: Dict[str, Any], context: TradingContext) -> TradingDecision:
+        """Parse agent responses into a trading decision."""
         
-        # Portfolio Management Agent
-        portfolio_manager = Agent(
-            name="Portfolio Manager",
-            instructions="""
-            You are a portfolio manager responsible for execution and allocation decisions.
-            
-            Your responsibilities:
-            - Make final trading decisions based on team input
-            - Manage position sizing and portfolio allocation
-            - Consider liquidity, market conditions, and timing
-            - Balance risk and reward across the portfolio
-            
-            Always provide:
-            1. Final trading recommendation (action + position size)
-            2. Execution strategy and timing
-            3. Portfolio impact assessment
-            4. Alternative scenarios consideration
-            5. Success probability estimate
-            
-            Consider all team input but make the final decision. Be decisive.
-            """,
-            model="gpt-4"  # Use GPT-4 for complex portfolio decisions
+        consensus = result.get("consensus", "hold")
+        confidence = result.get("confidence", 0.5)
+        agent_decisions = result.get("agent_decisions", {})
+        
+        # Build reasoning from agent responses
+        reasoning_parts = []
+        for agent_name, response_data in result.get("weighted_responses", {}).items():
+            if isinstance(response_data, dict):
+                reasoning_parts.append(f"{agent_name}: {response_data.get('response', '')[:200]}...")
+        
+        reasoning = "\n".join(reasoning_parts) if reasoning_parts else "Based on multi-agent analysis"
+        
+        # Calculate position size based on confidence and risk
+        position_size = self._calculate_position_size(confidence, context)
+        
+        # Set stop loss and take profit
+        stop_loss, take_profit = self._calculate_risk_levels(consensus, context)
+        
+        return TradingDecision(
+            action=consensus,
+            symbol=context.symbol,
+            confidence=confidence,
+            reasoning=reasoning,
+            position_size=position_size,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            agent_consensus=agent_decisions
+        )
+    
+    def _calculate_position_size(self, confidence: float, context: TradingContext) -> float:
+        """Calculate position size based on confidence and risk management."""
+        
+        # Kelly Criterion-inspired sizing
+        portfolio_value = context.portfolio_state.get("total_value", 100000)
+        max_risk_per_trade = 0.02  # 2% max risk
+        
+        # Adjust by confidence
+        risk_adjusted_size = max_risk_per_trade * confidence
+        
+        # Apply portfolio constraints
+        max_position_size = portfolio_value * risk_adjusted_size
+        
+        # Round to reasonable trading size
+        shares = int(max_position_size / context.current_price)
+        
+        return max(1, shares)  # At least 1 share
+    
+    def _calculate_risk_levels(
+        self, 
+        action: str, 
+        context: TradingContext
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Calculate stop loss and take profit levels."""
+        
+        if action == "hold":
+            return None, None
+        
+        current_price = context.current_price
+        atr = context.market_data.get("atr", current_price * 0.02)  # Default 2% if no ATR
+        
+        if action == "buy":
+            stop_loss = current_price - (2 * atr)  # 2 ATR stop
+            take_profit = current_price + (3 * atr)  # 3 ATR target
+        else:  # sell
+            stop_loss = current_price + (2 * atr)
+            take_profit = current_price - (3 * atr)
+        
+        return round(stop_loss, 2), round(take_profit, 2)
+    
+    async def analyze_market_regime(self, symbols: List[str]) -> Dict[str, Any]:
+        """Analyze overall market regime using agent consensus."""
+        
+        messages = [
+            {
+                "role": "user",
+                "content": f"""Analyze the current market regime for these symbols: {', '.join(symbols)}
+                
+Determine:
+1. Market trend (bullish/bearish/neutral)
+2. Volatility regime (low/medium/high)
+3. Risk appetite (risk-on/risk-off)
+4. Recommended portfolio stance
+5. Key risks to monitor
+
+Provide confidence scores for each assessment."""
+            }
+        ]
+        
+        # Use market analyst and risk manager for regime analysis
+        agents = [self.agents["market_analyst"], self.agents["risk_manager"]]
+        
+        result = await self.swarm.run_multiple(
+            agents,
+            messages,
+            context_variables={"symbols": symbols},
+            aggregation="weighted"
         )
         
         return {
-            "market_analyst": market_analyst,
-            "risk_manager": risk_manager, 
-            "signal_generator": signal_generator,
-            "portfolio_manager": portfolio_manager
+            "regime_analysis": result,
+            "timestamp": datetime.now().isoformat(),
+            "symbols_analyzed": symbols
         }
     
-    async def analyze_trading_opportunity(self, context: TradingContext) -> TradingDecision:
-        """Coordinate agents to make a trading decision."""
-        try:
-            # Prepare context for agents
-            context_str = self._format_context(context)
-            
-            # Step 1: Market Analysis
-            market_analysis = await self._get_agent_input(
-                "market_analyst", 
-                f"Analyze the current market situation for {context.symbol}:\n{context_str}"
-            )
-            
-            # Step 2: Generate Trading Signal
-            signal_prompt = f"""
-            Based on market analysis: {market_analysis}
-            
-            Generate a trading signal for {context.symbol}:
-            {context_str}
-            """
-            
-            trading_signal = await self._get_agent_input("signal_generator", signal_prompt)
-            
-            # Step 3: Risk Assessment
-            risk_prompt = f"""
-            Assess the risk for this trading opportunity:
-            
-            Market Analysis: {market_analysis}
-            Trading Signal: {trading_signal}
-            Context: {context_str}
-            """
-            
-            risk_assessment = await self._get_agent_input("risk_manager", risk_prompt)
-            
-            # Step 4: Final Portfolio Decision
-            decision_prompt = f"""
-            Make the final trading decision based on team analysis:
-            
-            Market Analysis: {market_analysis}
-            Trading Signal: {trading_signal}
-            Risk Assessment: {risk_assessment}
-            
-            Provide your final decision in JSON format:
-            {{
-                "action": "buy|sell|hold",
-                "confidence": 0-100,
-                "position_size": "percentage of portfolio",
-                "reasoning": "brief explanation",
-                "stop_loss": "price level",
-                "take_profit": "price level"
-            }}
-            """
-            
-            final_decision = await self._get_agent_input("portfolio_manager", decision_prompt)
-            
-            # Parse and validate decision
-            return self._parse_decision(
-                final_decision, 
-                context.symbol,
-                {
-                    "market_analysis": market_analysis,
-                    "signal": trading_signal,
-                    "risk_assessment": risk_assessment
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in agent coordination: {e}")
-            # Return safe default
-            return TradingDecision(
-                action="hold",
-                symbol=context.symbol,
-                confidence=0.0,
-                reasoning=f"Error in analysis: {str(e)}",
-                agent_consensus={"error": str(e)}
-            )
-    
-    async def _get_agent_input(self, agent_name: str, prompt: str) -> str:
-        """Get input from a specific agent."""
-        try:
-            agent = self.agents[agent_name]
-            
-            # For development, use mock responses if no API keys
-            if not self.settings.ai.openai_api_key:
-                return self._get_mock_response(agent_name, prompt)
-            
-            response = self.client.run(
-                agent=agent,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            return response.messages[-1]["content"]
-            
-        except Exception as e:
-            logger.warning(f"Agent {agent_name} failed: {e}")
-            return self._get_mock_response(agent_name, prompt)
-    
-    def _get_mock_response(self, agent_name: str, prompt: str) -> str:
-        """Generate mock responses for development/testing."""
-        mock_responses = {
-            "market_analyst": """
-            Market Analysis for {symbol}:
-            - Trend: Bullish short-term, consolidating
-            - Support: $145.20, Resistance: $152.80
-            - Volume: Above average, indicating interest
-            - RSI: 58 (neutral territory)
-            - Moving averages: Price above 20-day MA
-            - Sentiment: Cautiously optimistic
-            - Confidence: 72%
-            """,
-            
-            "risk_manager": """
-            Risk Assessment:
-            - Risk Score: 5/10 (moderate risk)
-            - Recommended position: 2-3% of portfolio
-            - Stop-loss: 3% below entry
-            - Take-profit: 6% above entry
-            - Max drawdown risk: 1.5%
-            - Portfolio correlation: Low
-            - Liquidity: High
-            """,
-            
-            "signal_generator": """
-            Trading Signal: BUY
-            - Signal strength: 68%
-            - Entry target: $150.50
-            - Expected move: +4-6% over 5-10 days
-            - Technical confluence: MA crossover + volume spike
-            - Momentum: Positive
-            - Pattern: Cup and handle formation
-            """,
-            
-            "portfolio_manager": json.dumps({
-                "action": "buy",
-                "confidence": 65,
-                "position_size": "2.5%",
-                "reasoning": "Moderate bullish setup with good risk/reward",
-                "stop_loss": "146.00", 
-                "take_profit": "158.00"
-            })
-        }
+    async def generate_portfolio_recommendations(
+        self, 
+        portfolio: Dict[str, Any],
+        market_conditions: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generate portfolio optimization recommendations."""
         
-        template = mock_responses.get(agent_name, "Analysis in progress...")
-        if "{symbol}" in template and hasattr(self, '_current_symbol'):
-            template = template.format(symbol=self._current_symbol)
-        return template
-    
-    def _format_context(self, context: TradingContext) -> str:
-        """Format trading context for agents."""
-        self._current_symbol = context.symbol  # Store for mock responses
+        messages = [
+            {
+                "role": "user", 
+                "content": f"""Given the current portfolio and market conditions, provide recommendations:
+
+Portfolio: {json.dumps(portfolio, indent=2)}
+Market Conditions: {json.dumps(market_conditions, indent=2)}
+
+Recommend:
+1. Rebalancing actions
+2. New positions to consider
+3. Positions to exit
+4. Risk adjustments
+5. Hedging strategies
+
+Provide specific, actionable recommendations with confidence scores."""
+            }
+        ]
         
-        return f"""
-        Symbol: {context.symbol}
-        Current Price: ${context.current_price:.2f}
+        # Use strategy and risk agents for portfolio recommendations
+        agents = [
+            self.agents["strategy_generator"],
+            self.agents["risk_manager"],
+            self.agents["execution_planner"]
+        ]
         
-        Market Data:
-        - Volume: {context.market_data.get('volume', 'N/A')}
-        - Price Change: {context.market_data.get('change', 'N/A')}
-        - High: {context.market_data.get('high', 'N/A')}
-        - Low: {context.market_data.get('low', 'N/A')}
-        
-        Portfolio State:
-        - Available Cash: {context.portfolio_state.get('cash', 'N/A')}
-        - Current Position: {context.portfolio_state.get('position', 'None')}
-        - Total Value: {context.portfolio_state.get('total_value', 'N/A')}
-        
-        Risk Metrics:
-        - Portfolio Beta: {context.risk_metrics.get('beta', 'N/A')}
-        - VaR: {context.risk_metrics.get('var', 'N/A')}
-        - Sharpe Ratio: {context.risk_metrics.get('sharpe', 'N/A')}
-        
-        News Sentiment: {context.news_sentiment.get('score', 'Neutral') if context.news_sentiment else 'N/A'}
-        """
-    
-    def _parse_decision(self, decision_text: str, symbol: str, agent_inputs: Dict[str, str]) -> TradingDecision:
-        """Parse agent decision into structured format."""
-        try:
-            # Try to parse JSON from decision
-            if "{" in decision_text:
-                json_start = decision_text.find("{")
-                json_end = decision_text.rfind("}") + 1
-                json_str = decision_text[json_start:json_end]
-                decision_data = json.loads(json_str)
-                
-                return TradingDecision(
-                    action=decision_data.get("action", "hold").lower(),
-                    symbol=symbol,
-                    confidence=float(decision_data.get("confidence", 50)),
-                    reasoning=decision_data.get("reasoning", "No reasoning provided"),
-                    position_size=self._parse_position_size(decision_data.get("position_size")),
-                    stop_loss=self._parse_price(decision_data.get("stop_loss")),
-                    take_profit=self._parse_price(decision_data.get("take_profit")),
-                    agent_consensus=agent_inputs
-                )
-        except Exception as e:
-            logger.warning(f"Failed to parse decision JSON: {e}")
-        
-        # Fallback to text parsing
-        action = "hold"
-        if "buy" in decision_text.lower():
-            action = "buy"
-        elif "sell" in decision_text.lower():
-            action = "sell"
-        
-        return TradingDecision(
-            action=action,
-            symbol=symbol,
-            confidence=50.0,
-            reasoning=decision_text[:200] + "..." if len(decision_text) > 200 else decision_text,
-            agent_consensus=agent_inputs
+        result = await self.swarm.run_multiple(
+            agents,
+            messages,
+            context_variables={
+                "portfolio": portfolio,
+                "market_conditions": market_conditions
+            },
+            aggregation="consensus"
         )
+        
+        return {
+            "recommendations": result,
+            "generated_at": datetime.now().isoformat()
+        }
     
-    def _parse_position_size(self, size_str: str) -> Optional[float]:
-        """Parse position size from string."""
-        if not size_str:
-            return None
-        try:
-            # Remove % and convert to decimal
-            size_str = str(size_str).replace("%", "").strip()
-            return float(size_str) / 100.0
-        except:
-            return None
+    async def process_news_impact(
+        self,
+        news_items: List[Dict[str, Any]],
+        positions: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze news impact on current positions."""
+        
+        messages = [
+            {
+                "role": "user",
+                "content": f"""Analyze the impact of recent news on our positions:
+
+News Items: {json.dumps(news_items[:5], indent=2)}  # First 5 items
+Current Positions: {json.dumps(positions, indent=2)}
+
+Assess:
+1. Sentiment impact on each position
+2. Urgency of action required (1-10)
+3. Recommended actions
+4. Risk adjustments needed
+5. Opportunities created
+
+Be specific about which news affects which positions."""
+            }
+        ]
+        
+        # Use sentiment analyst primarily
+        result = await self.swarm.run(
+            self.agents["sentiment_analyst"],
+            messages,
+            context_variables={
+                "news": news_items,
+                "positions": positions
+            }
+        )
+        
+        return {
+            "impact_analysis": result.content,
+            "confidence": result.confidence,
+            "analyzed_at": datetime.now().isoformat()
+        }
     
-    def _parse_price(self, price_str: str) -> Optional[float]:
-        """Parse price from string."""
-        if not price_str:
-            return None
-        try:
-            # Remove $ and convert to float
-            price_str = str(price_str).replace("$", "").strip()
-            return float(price_str)
-        except:
-            return None
+    async def validate_trade_idea(
+        self,
+        trade_idea: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Validate a trade idea through multi-agent review."""
+        
+        messages = [
+            {
+                "role": "user",
+                "content": f"""Validate this trade idea:
+
+{json.dumps(trade_idea, indent=2)}
+
+Evaluate:
+1. Technical merit (1-10)
+2. Risk/reward ratio
+3. Market timing appropriateness
+4. Portfolio fit
+5. Execution feasibility
+
+Provide GO/NO-GO decision with detailed reasoning."""
+            }
+        ]
+        
+        # Run all agents for comprehensive validation
+        result = await self.swarm.run_multiple(
+            list(self.agents.values()),
+            messages,
+            context_variables=trade_idea,
+            aggregation="consensus"
+        )
+        
+        # Extract validation decision
+        go_no_go = "GO" if result.get("confidence", 0) > 0.6 else "NO-GO"
+        
+        return {
+            "decision": go_no_go,
+            "confidence": result.get("confidence", 0),
+            "agent_feedback": result.get("agent_decisions", {}),
+            "detailed_analysis": result,
+            "validated_at": datetime.now().isoformat()
+        }
     
-    async def get_agent_status(self) -> Dict[str, bool]:
-        """Check status of all agents."""
-        status = {}
-        for name, agent in self.agents.items():
+    async def health_check(self) -> Dict[str, Any]:
+        """Check health of all agents and models."""
+        
+        health_status = {}
+        
+        # Check each agent's model availability
+        for agent_name, agent in self.agents.items():
             try:
-                # Simple test to verify agent is working
-                test_response = await self._get_agent_input(name, "Status check")
-                status[name] = bool(test_response)
+                # Quick test prompt
+                response = await agent.execute("Return 'OK' if you're working", {})
+                health_status[agent_name] = {
+                    "status": "healthy" if "OK" in response else "degraded",
+                    "model": agent.model,
+                    "response_sample": response[:100]
+                }
             except Exception as e:
-                logger.warning(f"Agent {name} status check failed: {e}")
-                status[name] = False
-        return status
+                health_status[agent_name] = {
+                    "status": "unhealthy",
+                    "model": agent.model,
+                    "error": str(e)
+                }
+        
+        # Overall health
+        unhealthy_count = sum(1 for s in health_status.values() if s["status"] == "unhealthy")
+        overall_health = "healthy" if unhealthy_count == 0 else "degraded" if unhealthy_count < 3 else "unhealthy"
+        
+        return {
+            "overall_health": overall_health,
+            "agents": health_status,
+            "checked_at": datetime.now().isoformat(),
+            "using_local_models": True,
+            "api_costs": "$0.00 - All models run locally"
+        }
 
 
 # Global orchestrator instance
 _orchestrator: Optional[TradingAgentOrchestrator] = None
 
 
-async def get_trading_orchestrator() -> TradingAgentOrchestrator:
-    """Get or create global trading agent orchestrator."""
+async def get_orchestrator() -> TradingAgentOrchestrator:
+    """Get or create global orchestrator instance."""
     global _orchestrator
     if _orchestrator is None:
         _orchestrator = TradingAgentOrchestrator()
@@ -419,12 +400,6 @@ async def get_trading_orchestrator() -> TradingAgentOrchestrator:
 
 
 async def make_trading_decision(context: TradingContext) -> TradingDecision:
-    """Make a coordinated trading decision using all agents."""
-    orchestrator = await get_trading_orchestrator()
-    return await orchestrator.analyze_trading_opportunity(context)
-
-
-async def check_agents_health() -> Dict[str, bool]:
-    """Check health of all trading agents."""
-    orchestrator = await get_trading_orchestrator()
-    return await orchestrator.get_agent_status()
+    """Make a trading decision using agent orchestration."""
+    orchestrator = await get_orchestrator()
+    return await orchestrator.make_trading_decision(context)

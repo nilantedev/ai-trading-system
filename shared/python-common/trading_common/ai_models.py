@@ -1,4 +1,4 @@
-"""AI model infrastructure for trading system with local and cloud model support."""
+"""AI model infrastructure for trading system with local model support only."""
 
 import asyncio
 import json
@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import httpx
-from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
+# Removed paid API imports - using only local models
 
 from .config import get_settings
 
@@ -20,8 +19,7 @@ logger = logging.getLogger(__name__)
 class ModelType(Enum):
     """Supported model types."""
     LOCAL_OLLAMA = "local_ollama"
-    OPENAI = "openai" 
-    ANTHROPIC = "anthropic"
+    # Paid APIs removed - using only local models
 
 
 @dataclass
@@ -48,13 +46,20 @@ class BaseModelClient:
 
 
 class OllamaClient(BaseModelClient):
-    """Ollama local model client."""
+    """Ollama local model client with advanced models."""
     
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.client = httpx.AsyncClient(timeout=60.0)  # Increased timeout for large models
+        # Default to powerful open-source models
+        self.default_models = {
+            "analysis": "qwen2.5:72b",  # Powerful analysis model
+            "risk": "deepseek-r1:70b",  # Risk assessment
+            "strategy": "llama3.1:70b",  # Strategy generation
+            "default": "mixtral:8x7b"  # Fast default model
+        }
         
-    async def generate(self, prompt: str, model: str = "phi3:mini", **kwargs) -> ModelResponse:
+    async def generate(self, prompt: str, model: str = "mixtral:8x7b", **kwargs) -> ModelResponse:
         """Generate response using local Ollama model."""
         start_time = datetime.now()
         
@@ -116,116 +121,7 @@ class OllamaClient(BaseModelClient):
             return []
 
 
-class OpenAIClient(BaseModelClient):
-    """OpenAI API client."""
-    
-    def __init__(self, api_key: Optional[str] = None):
-        settings = get_settings()
-        self.client = AsyncOpenAI(
-            api_key=api_key or settings.ai.openai_api_key
-        )
-        
-    async def generate(self, prompt: str, model: str = "gpt-4o-mini", **kwargs) -> ModelResponse:
-        """Generate response using OpenAI model."""
-        start_time = datetime.now()
-        
-        try:
-            # Prepare messages
-            messages = [{"role": "user", "content": prompt}]
-            
-            # Make request
-            response = await self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                **kwargs
-            )
-            
-            latency = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return ModelResponse(
-                content=response.choices[0].message.content,
-                model=f"openai/{model}",
-                usage={
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
-                } if response.usage else None,
-                latency_ms=latency,
-                metadata={
-                    "finish_reason": response.choices[0].finish_reason,
-                    "id": response.id,
-                    "created": response.created
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"OpenAI generation failed: {e}")
-            raise
-    
-    async def health_check(self) -> bool:
-        """Check OpenAI API health."""
-        try:
-            await self.client.models.list()
-            return True
-        except Exception:
-            return False
-
-
-class AnthropicClient(BaseModelClient):
-    """Anthropic Claude API client."""
-    
-    def __init__(self, api_key: Optional[str] = None):
-        settings = get_settings()
-        self.client = AsyncAnthropic(
-            api_key=api_key or settings.ai.anthropic_api_key
-        )
-        
-    async def generate(self, prompt: str, model: str = "claude-3-haiku-20240307", **kwargs) -> ModelResponse:
-        """Generate response using Anthropic model."""
-        start_time = datetime.now()
-        
-        try:
-            # Make request
-            response = await self.client.messages.create(
-                model=model,
-                max_tokens=kwargs.get("max_tokens", 1000),
-                messages=[{"role": "user", "content": prompt}],
-                **{k: v for k, v in kwargs.items() if k != "max_tokens"}
-            )
-            
-            latency = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return ModelResponse(
-                content=response.content[0].text if response.content else "",
-                model=f"anthropic/{model}",
-                usage={
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                } if response.usage else None,
-                latency_ms=latency,
-                metadata={
-                    "id": response.id,
-                    "role": response.role,
-                    "stop_reason": response.stop_reason
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"Anthropic generation failed: {e}")
-            raise
-    
-    async def health_check(self) -> bool:
-        """Check Anthropic API health."""
-        try:
-            # Simple test request
-            await self.client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}]
-            )
-            return True
-        except Exception:
-            return False
+# OpenAI client removed - using only local models for cost-free operation# Anthropic client removed - using only local models for cost-free operation
 
 
 class ModelRouter:
@@ -238,15 +134,9 @@ class ModelRouter:
         
     def _initialize_clients(self):
         """Initialize available model clients."""
-        # Always initialize Ollama for local models
+        # Only initialize Ollama for local models (cost-free operation)
         self.clients[ModelType.LOCAL_OLLAMA] = OllamaClient()
-        
-        # Initialize cloud clients if API keys are available
-        if self.settings.ai.openai_api_key:
-            self.clients[ModelType.OPENAI] = OpenAIClient()
-            
-        if self.settings.ai.anthropic_api_key:
-            self.clients[ModelType.ANTHROPIC] = AnthropicClient()
+        logger.info("AI Model Router initialized with local Ollama models only")
     
     async def generate(
         self, 
@@ -255,9 +145,9 @@ class ModelRouter:
         **kwargs
     ) -> ModelResponse:
         """Generate response with automatic failover."""
-        # Default preference: local first, then cloud
+        # Only use local models for cost-free operation
         if model_preference is None:
-            model_preference = [ModelType.LOCAL_OLLAMA, ModelType.OPENAI, ModelType.ANTHROPIC]
+            model_preference = [ModelType.LOCAL_OLLAMA]
         
         last_error = None
         
@@ -296,11 +186,8 @@ class ModelRouter:
                     if hasattr(client, 'list_models'):
                         available[model_type.value] = await client.list_models()
                     else:
-                        # Default models for cloud services
-                        if model_type == ModelType.OPENAI:
-                            available[model_type.value] = ["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"]
-                        elif model_type == ModelType.ANTHROPIC:
-                            available[model_type.value] = ["claude-3-haiku-20240307", "claude-3-sonnet-20240229"]
+                        # Only local models available
+                        available[model_type.value] = []
             except Exception as e:
                 logger.warning(f"Failed to get models for {model_type.value}: {e}")
         

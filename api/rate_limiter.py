@@ -24,6 +24,8 @@ class RedisRateLimiter:
         self.redis_password = os.getenv("REDIS_PASSWORD")
         self.redis: Optional[aioredis.Redis] = None
         self.connected = False
+        self.degraded_mode = False  # True when operating with relaxed safeguards due to backend outage
+        self._degraded_last_log: float = 0.0
         
         # Default rate limit settings (can be overridden)
         self.default_requests_per_minute = int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "100"))
@@ -64,6 +66,13 @@ class RedisRateLimiter:
             await asyncio.wait_for(self.redis.ping(), timeout=5.0)
             self.connected = True
             logger.info("Redis rate limiter connected successfully")
+            # Clear degraded mode if previously set
+            self.degraded_mode = False
+            try:
+                from api.metrics import rate_limiter_degraded
+                rate_limiter_degraded.set(0)
+            except Exception:
+                pass
             
         except asyncio.TimeoutError:
             logger.error("Redis connection timeout - rate limiting will fail closed in production")
@@ -72,6 +81,7 @@ class RedisRateLimiter:
             if environment in ["production", "staging", "prod"]:
                 raise RuntimeError("Redis required for production - cannot start without rate limiting")
             self._memory_cache = {}
+            self._enter_degraded_mode(reason="timeout during initialize")
         except Exception as e:
             logger.error(f"Failed to connect to Redis for rate limiting: {e}")
             self.connected = False
@@ -80,6 +90,20 @@ class RedisRateLimiter:
                 raise RuntimeError(f"Redis required for production: {e}")
             # Development only fallback
             self._memory_cache = {}
+            self._enter_degraded_mode(reason=str(e))
+
+    def _enter_degraded_mode(self, reason: str):
+        """Activate degraded mode (limited permissive behavior) with throttled logging."""
+        self.degraded_mode = True
+        now = time.time()
+        if now - self._degraded_last_log > 30:  # throttle logs
+            logger.warning(f"Rate limiter entering degraded mode: {reason}")
+            self._degraded_last_log = now
+        try:
+            from api.metrics import rate_limiter_degraded
+            rate_limiter_degraded.set(1)
+        except Exception:
+            pass
     
     async def check_rate_limit(
         self, 
@@ -99,33 +123,43 @@ class RedisRateLimiter:
             Dict with rate limit status and metadata
         """
         if not self.connected:
-            # In production, fail closed rather than permissive fallback
             environment = os.getenv("ENVIRONMENT", "development")
-            if environment in ["production", "staging", "prod"]:
-                logger.error("Redis not available for rate limiting - denying request for safety")
+            fail_closed = os.getenv("RATE_LIMIT_FAIL_CLOSED", "true").lower() == "true"
+            
+            # In production, ALWAYS fail closed when Redis is unavailable
+            if environment in ["production", "staging", "prod"] and fail_closed:
+                logger.error("Redis unavailable - denying ALL requests (fail-closed mode)")
                 return self._create_rate_limit_response(
                     allowed=False,
                     current_requests=0,
                     limit=0,
                     window=60,
                     reset_time=time.time() + 60,
-                    error="Rate limiter unavailable - request denied for safety"
+                    error="Rate limiter unavailable - failing closed for security"
                 )
-            elif environment == "development":
-                # Development only: fallback to memory with strict warning
-                logger.warning("Redis not available - using in-memory fallback (DEVELOPMENT ONLY)")
-                return await self._check_memory_fallback(identifier, limit_type)
-            else:
-                # Unknown environment - fail closed for safety
-                logger.error(f"Unknown environment '{environment}' - denying request for safety")
-                return self._create_rate_limit_response(
-                    allowed=False,
-                    current_requests=0,
-                    limit=0,
-                    window=60,
-                    reset_time=time.time() + 60,
-                    error="Invalid environment configuration"
-                )
+            
+            # Development only: allow with memory fallback (NOT FOR PRODUCTION)
+            if environment not in ["production", "staging", "prod"]:
+                if not self.degraded_mode:
+                    self._enter_degraded_mode("redis disconnected - DEV ONLY memory fallback")
+                result = await self._check_memory_fallback(identifier, limit_type)
+                try:
+                    from api.metrics import rate_limiter_fallback_requests_total
+                    rate_limiter_fallback_requests_total.labels(status='allowed' if result['allowed'] else 'blocked').inc()
+                except Exception:
+                    pass
+                return result
+            
+            # Should never reach here in production
+            logger.critical("Rate limiter in undefined state - denying request")
+            return self._create_rate_limit_response(
+                allowed=False,
+                current_requests=0,
+                limit=0,
+                window=60,
+                reset_time=time.time() + 60,
+                error="Rate limiter error - request denied"
+            )
         
         # Get rate limit configuration
         if custom_limit:
@@ -203,19 +237,20 @@ class RedisRateLimiter:
             
         except Exception as e:
             logger.error(f"Redis rate limit check failed: {e}")
-            # Fallback to allowing request on Redis errors
-            return self._create_rate_limit_response(
-                allowed=True,
-                current_requests=0,
-                limit=requests_allowed,
-                window=window_seconds,
-                reset_time=current_time + window_seconds,
-                error="Redis unavailable - rate limiting disabled"
-            )
+            # Enter degraded mode and memory fallback while allowing request (safer than full deny mid-flight)
+            self._enter_degraded_mode(reason=f"redis ops error: {e}")
+            fb = await self._check_memory_fallback(identifier, limit_type)
+            try:
+                from api.metrics import rate_limiter_fallback_requests_total
+                rate_limiter_fallback_requests_total.labels(status='allowed' if fb['allowed'] else 'blocked').inc()
+            except Exception:
+                pass
+            return fb
     
     async def _check_memory_fallback(self, identifier: str, limit_type: str) -> Dict[str, Any]:
         """Fallback in-memory rate limiting (not recommended for production)."""
-        logger.warning("Using in-memory rate limiting fallback - not recommended for production!")
+        if not self.degraded_mode:
+            logger.warning("Using in-memory rate limiting fallback - not recommended for production!")
         
         config = self.rate_limits.get(limit_type, self.rate_limits["default"])
         requests_allowed = config["requests"]
@@ -259,7 +294,7 @@ class RedisRateLimiter:
             limit=requests_allowed,
             window=window_seconds,
             reset_time=current_time + window_seconds,
-            error="Using memory fallback"
+            error="degraded-memory-fallback"
         )
     
     def _create_rate_limit_response(

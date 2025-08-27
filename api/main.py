@@ -234,6 +234,14 @@ async def consolidated_startup():
     try:
         logger.info("Initializing middleware stack", phase=3)
         
+        # Add audit middleware early (after logging middleware already defined by decorator)
+        try:
+            from api.audit_middleware import AuditMiddleware
+            app.add_middleware(AuditMiddleware)
+            logger.info("Audit middleware initialized", phase=3, component="audit", result="success")
+        except ImportError:
+            logger.warning("Audit middleware not found - continuing without audit logging", phase=3, component="audit", skipped=True)
+
         # Add metrics middleware (applied last)
         try:
             from api.metrics import create_metrics_middleware, get_metrics_handler

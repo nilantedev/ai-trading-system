@@ -731,8 +731,8 @@ class EnhancedBackupManager:
     async def _backup_configuration(self, backup_id: str) -> Dict[str, Any]:
         """Backup system configuration files."""
         config_files = [
-            ".env.template",  # Don't backup actual .env with secrets
-            ".env.production.template",
+            ".env.example",  # Don't backup actual .env with secrets
+            ".env.production.example",
             "config/",
             "docker-compose.yml",
             "docker-compose.production.yml",

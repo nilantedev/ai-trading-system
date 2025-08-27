@@ -18,10 +18,10 @@ shared_dir = Path(__file__).parent.parent / "shared" / "python-common"
 sys.path.append(str(shared_dir))
 
 try:
-    from trading_common.audit_logger import (
+    from trading_common.audit_logger import (  # type: ignore[import-not-found]
         get_audit_logger, AuditEventType, AuditSeverity, AuditContext, log_audit_event
     )
-    from trading_common.logging import get_logger
+    from trading_common.logging import get_logger  # type: ignore[import-not-found]
 except ImportError:
     # Fallback
     import logging
@@ -89,9 +89,12 @@ class AuditMiddleware:
     
     async def __call__(self, request: Request, call_next: Callable) -> Response:
         """Process request through audit middleware."""
-        # Generate correlation ID
-        correlation_id = str(uuid.uuid4())
-        request.state.correlation_id = correlation_id
+        # Reuse existing correlation ID if already set by upstream middleware (e.g., logging)
+        existing_id = getattr(request.state, 'correlation_id', None)
+        correlation_id = existing_id or str(uuid.uuid4())
+        # Only set if not previously defined to avoid mismatches across layers
+        if existing_id is None:
+            request.state.correlation_id = correlation_id
         
         # Start timing
         start_time = time.time()

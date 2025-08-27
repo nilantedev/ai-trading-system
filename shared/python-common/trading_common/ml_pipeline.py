@@ -356,6 +356,7 @@ class MLPipeline:
             git_commit=git_commit,
             config=asdict(config),
             metrics=metrics.to_dict(),
+            artifact_path=str(model_path),
         )
         manifest_path = model_path.with_suffix('.manifest.json')
         try:
@@ -380,6 +381,20 @@ class MLPipeline:
         await self.registry.upsert_entry(entry)
         self.models[config.model_name] = model
         logger.info("Model training completed: %s", config.model_name)
+        # Emit promotion candidate event (best-effort)
+        try:  # pragma: no cover
+            from trading_common.event_logging import emit_event
+            emit_event(
+                event_type="model.promotion.candidate",
+                model_name=config.model_name,
+                version=config.version,
+                metrics=metrics.to_dict(),
+                feature_graph_hash=feature_graph_hash,
+                training_config_hash=training_config_hash,
+                dataset_hash=dataset_hash,
+            )
+        except Exception:
+            pass
         return model, metrics
 
     async def _register_model(self, *args, **kwargs):  # legacy compatibility

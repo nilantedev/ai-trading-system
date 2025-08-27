@@ -205,7 +205,7 @@ class NewsProcessor:
             
             response = await generate_response(
                 prompt,
-                model_preference=[ModelType.LOCAL_OLLAMA, ModelType.OPENAI]
+                model_preference=[ModelType.LOCAL_OLLAMA]  # Only local models
             )
             
             # Extract numeric sentiment
