@@ -70,9 +70,12 @@ class User(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     disabled: bool = False
+    is_active: bool = True  # Added for auth router
     roles: List[str] = []
+    permissions: List[str] = []  # Added for auth router
     api_key_id: Optional[str] = None
     last_login: Optional[datetime] = None
+    created_at: datetime = datetime.now(timezone.utc)  # Added for auth router
     mfa_enabled: bool = False
 
 
@@ -544,11 +547,18 @@ async def get_current_user(
         )
         
         # Create user object from token
+        roles = payload.get("roles", [])
+        permissions = []
+        for role in roles:
+            permissions.extend(get_role_permissions(role))
+        
         user = User(
             user_id=payload.get("sub", ""),
             username=payload.get("username", ""),
             email=payload.get("email"),
-            roles=payload.get("roles", [])
+            roles=roles,
+            permissions=list(set(permissions)),  # Remove duplicates
+            is_active=True  # If token is valid, user is active
         )
         
         return user
@@ -597,3 +607,193 @@ def require_roles(*allowed_roles: str):
             )
         return current_user
     return role_checker
+
+
+# Additional functions required by auth router
+JWT_EXPIRY_MINUTES = 15  # Default token expiry
+
+
+def get_role_permissions(role: str) -> List[str]:
+    """
+    Get permissions for a given role
+    """
+    role_permissions = {
+        "admin": [
+            "admin:*",
+            "trading:*",
+            "analytics:*",
+            "user:*",
+            "system:*"
+        ],
+        "trader": [
+            "trading:read",
+            "trading:write",
+            "trading:execute",
+            "analytics:read",
+            "portfolio:read",
+            "portfolio:write"
+        ],
+        "analyst": [
+            "trading:read",
+            "analytics:*",
+            "portfolio:read",
+            "reports:*"
+        ],
+        "viewer": [
+            "trading:read",
+            "analytics:read",
+            "portfolio:read"
+        ],
+        "service": [
+            "system:read",
+            "system:write",
+            "metrics:write"
+        ]
+    }
+    
+    return role_permissions.get(role, [])
+
+
+async def authenticate_user(username: str, password: str, client_ip: str = "unknown") -> Optional[User]:
+    """
+    Authenticate a user with username and password
+    Includes brute force protection
+    """
+    auth_manager = await get_auth_manager()
+    
+    # Check brute force protection
+    if await auth_manager.check_brute_force(username):
+        logger.warning(f"Account {username} locked due to too many failed attempts from {client_ip}")
+        return None
+    
+    # Import here to avoid circular dependency
+    from trading_common.user_repository import UserRepository
+    
+    # Get user from database
+    user_repo = UserRepository()
+    user_data = await user_repo.get_user_by_username(username)
+    
+    if not user_data:
+        await auth_manager.record_failed_attempt(username)
+        return None
+    
+    # Verify password
+    if not auth_manager.verify_password(password, user_data.hashed_password):
+        await auth_manager.record_failed_attempt(username)
+        return None
+    
+    # Clear failed attempts on successful auth
+    await auth_manager.clear_failed_attempts(username)
+    
+    # Update last login
+    await user_repo.update_last_login(user_data.id)
+    
+    # Create User object
+    user = User(
+        user_id=str(user_data.id),
+        username=user_data.username,
+        email=user_data.email,
+        full_name=user_data.full_name,
+        disabled=not user_data.is_active,
+        is_active=user_data.is_active,
+        roles=[user_data.role],
+        permissions=get_role_permissions(user_data.role),  # Get permissions based on role
+        created_at=user_data.created_at if hasattr(user_data, 'created_at') else datetime.now(timezone.utc),
+        last_login=datetime.now(timezone.utc)
+    )
+    
+    logger.info(f"User {username} authenticated successfully from {client_ip}")
+    return user
+
+
+def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a JWT access token for a user (synchronous wrapper)
+    """
+    import asyncio
+    
+    async def _create():
+        auth_manager = await get_auth_manager()
+        
+        data = {
+            "sub": user.user_id,
+            "username": user.username,
+            "email": user.email,
+            "roles": user.roles,
+            "type": "access"
+        }
+        
+        return await auth_manager.create_access_token(data, expires_delta)
+    
+    # Run async function in sync context
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        # If loop is already running, create task
+        task = asyncio.create_task(_create())
+        return asyncio.run_until_complete(task)
+    else:
+        return asyncio.run(_create())
+
+
+def get_auth_health() -> dict:
+    """
+    Get authentication system health status
+    """
+    try:
+        import asyncio
+        
+        async def _get_health():
+            auth_manager = await get_auth_manager()
+            
+            health_status = {
+                "status": "healthy",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "components": {
+                    "jwt_keys": {
+                        "active": auth_manager.active_key is not None,
+                        "total_keys": len(auth_manager.keys),
+                        "rotation_days": auth_manager.key_rotation_days
+                    },
+                    "redis": {
+                        "connected": auth_manager.redis is not None
+                    },
+                    "security": {
+                        "max_failed_attempts": auth_manager.max_failed_attempts,
+                        "lockout_duration_minutes": auth_manager.lockout_duration_minutes,
+                        "mfa_required_for_sensitive": auth_manager.require_mfa_for_sensitive
+                    },
+                    "tokens": {
+                        "access_token_expire_minutes": auth_manager.access_token_expire_minutes,
+                        "refresh_token_expire_days": auth_manager.refresh_token_expire_days,
+                        "revoked_count": len(auth_manager.revoked_tokens)
+                    }
+                }
+            }
+            
+            # Check Redis connectivity
+            if auth_manager.redis:
+                try:
+                    await auth_manager.redis.ping()
+                    health_status["components"]["redis"]["status"] = "connected"
+                except Exception as e:
+                    health_status["components"]["redis"]["status"] = "disconnected"
+                    health_status["components"]["redis"]["error"] = str(e)
+                    health_status["status"] = "degraded"
+            
+            return health_status
+        
+        # Run async function
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            task = asyncio.create_task(_get_health())
+            return asyncio.run_until_complete(task)
+        else:
+            return asyncio.run(_get_health())
+            
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }

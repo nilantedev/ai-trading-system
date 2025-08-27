@@ -74,11 +74,24 @@ async def create_default_admin():
             created_by="system_init"
         )
         
+        # Save password to secure file instead of logging
+        import os
+        password_file = os.path.join(os.path.dirname(__file__), ".admin_credentials")
+        with open(password_file, 'w') as f:
+            f.write(f"Username: admin\n")
+            f.write(f"Email: {admin_email}\n")
+            f.write(f"Password: {admin_password}\n")
+            f.write(f"Created: {datetime.now().isoformat()}\n")
+            f.write("\n⚠️  CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN!\n")
+        
+        # Set restrictive permissions
+        os.chmod(password_file, 0o600)
+        
         logger.info(f"Created default admin user:")
         logger.info(f"  Username: admin")
         logger.info(f"  Email: {admin_email}")
-        logger.info(f"  Password: {admin_password}")
-        logger.warning("IMPORTANT: Save this password and change it immediately after first login!")
+        logger.info(f"  Credentials saved to: {password_file}")
+        logger.warning("IMPORTANT: Change the password immediately after first login!")
         
         return admin_user
         

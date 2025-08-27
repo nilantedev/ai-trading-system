@@ -1,0 +1,354 @@
+# Production AI Models Configuration
+# Updated: 2025
+# State-of-the-art models for trading system
+
+# Large Language Models (LLMs)
+llms:
+  primary:
+    # DeepSeek V3 - 685B parameters, exceptional reasoning
+    deepseek_v3:
+      model: "deepseek-v3"
+      provider: "local"  # Can run locally with sufficient resources
+      requirements:
+        ram: "256GB"  # Minimum for 4-bit quantization
+        vram: "80GB"   # For GPU inference (A100 or better)
+      capabilities:
+        - financial_analysis
+        - market_reasoning
+        - code_generation
+        - risk_assessment
+      
+    # Llama 3.3 70B - Latest from Meta, excellent performance
+    llama_3_3:
+      model: "llama-3.3-70b-instruct"
+      provider: "local"
+      quantization: "Q4_K_M"  # 4-bit quantization for efficiency
+      requirements:
+        ram: "48GB"
+        vram: "40GB"
+      capabilities:
+        - market_analysis
+        - sentiment_analysis
+        - report_generation
+    
+    # Qwen 2.5 72B - Strong finance domain performance
+    qwen_2_5:
+      model: "qwen2.5-72b-instruct"
+      provider: "local"
+      quantization: "Q4_K_S"
+      requirements:
+        ram: "48GB"
+        vram: "40GB"
+      capabilities:
+        - chinese_markets
+        - technical_analysis
+        - multi_language
+  
+  specialized:
+    # Mixtral 8x22B - MoE for efficiency
+    mixtral:
+      model: "mixtral-8x22b-instruct"
+      provider: "local"
+      quantization: "Q5_K_M"
+      requirements:
+        ram: "96GB"
+        vram: "48GB"
+      capabilities:
+        - parallel_analysis
+        - multi_task
+        - fast_inference
+    
+    # Command R+ - Excellent for retrieval and analysis
+    command_r_plus:
+      model: "command-r-plus"
+      provider: "cohere"
+      api_key: "${COHERE_API_KEY}"
+      capabilities:
+        - document_retrieval
+        - financial_research
+        - rag_optimization
+
+  cloud_backup:
+    # GPT-4o - Best overall performance
+    gpt4o:
+      model: "gpt-4o"
+      provider: "openai"
+      api_key: "${OPENAI_API_KEY}"
+      capabilities:
+        - complex_reasoning
+        - multi_modal
+        - code_generation
+    
+    # Claude 3.5 Sonnet - Strong analytical capabilities
+    claude_3_5:
+      model: "claude-3.5-sonnet"
+      provider: "anthropic"
+      api_key: "${ANTHROPIC_API_KEY}"
+      capabilities:
+        - detailed_analysis
+        - risk_assessment
+        - compliance_checking
+
+# Specialized Trading Models
+trading_models:
+  
+  # Time Series Forecasting
+  time_series:
+    # TimeGPT - Specialized for time series
+    timegpt:
+      model: "timegpt-1"
+      provider: "nixtla"
+      api_key: "${NIXTLA_API_KEY}"
+      capabilities:
+        - multi_horizon_forecast
+        - anomaly_detection
+        - confidence_intervals
+    
+    # Chronos - Amazon's time series model
+    chronos:
+      model: "amazon/chronos-t5-large"
+      provider: "huggingface"
+      local: true
+      requirements:
+        ram: "16GB"
+    
+    # Lag-Llama - Open source time series
+    lag_llama:
+      model: "lag-llama"
+      provider: "local"
+      requirements:
+        ram: "8GB"
+  
+  # Market Prediction Models
+  market_prediction:
+    # FinGPT - Financial domain specific
+    fingpt:
+      model: "fingpt-forecaster"
+      provider: "huggingface"
+      version: "v3.2"
+      capabilities:
+        - stock_prediction
+        - options_pricing
+        - volatility_forecast
+    
+    # BloombergGPT (if available)
+    bloomberg_gpt:
+      model: "bloomberg-gpt-50b"
+      provider: "bloomberg"
+      api_key: "${BLOOMBERG_API_KEY}"
+      requires_license: true
+      capabilities:
+        - financial_nlp
+        - market_sentiment
+        - news_analysis
+
+# Computer Vision Models (for chart analysis)
+vision_models:
+  # Qwen-VL - Multimodal for chart analysis
+  qwen_vl:
+    model: "qwen-vl-max"
+    provider: "local"
+    capabilities:
+      - chart_pattern_recognition
+      - technical_analysis
+      - visual_market_analysis
+  
+  # LLaVA - Open source vision model
+  llava:
+    model: "llava-v1.6-34b"
+    provider: "local"
+    quantization: "Q4_K_M"
+    requirements:
+      ram: "24GB"
+      vram: "16GB"
+
+# Embedding Models
+embeddings:
+  # Voyage AI - Best for finance
+  voyage:
+    model: "voyage-finance-2"
+    provider: "voyage"
+    api_key: "${VOYAGE_API_KEY}"
+    dimensions: 1024
+    capabilities:
+      - financial_documents
+      - similarity_search
+  
+  # BGE-M3 - Multilingual and efficient
+  bge_m3:
+    model: "BAAI/bge-m3"
+    provider: "huggingface"
+    local: true
+    dimensions: 1024
+  
+  # E5-Mistral - Strong performance
+  e5_mistral:
+    model: "intfloat/e5-mistral-7b-instruct"
+    provider: "huggingface"
+    local: true
+    dimensions: 4096
+
+# Specialized AI Agents
+ai_agents:
+  # Market Analyst Agent
+  market_analyst:
+    base_model: "deepseek-v3"
+    fine_tuned: true
+    training_data: "financial_reports"
+    specialization:
+      - fundamental_analysis
+      - earnings_prediction
+      - sector_rotation
+  
+  # Risk Manager Agent
+  risk_manager:
+    base_model: "llama-3.3-70b"
+    fine_tuned: true
+    training_data: "risk_scenarios"
+    specialization:
+      - portfolio_risk
+      - var_calculation
+      - stress_testing
+  
+  # Options Trader Agent
+  options_trader:
+    base_model: "qwen2.5-72b"
+    fine_tuned: true
+    training_data: "options_strategies"
+    specialization:
+      - greeks_calculation
+      - volatility_surface
+      - optimal_strikes
+  
+  # News Analyzer Agent
+  news_analyzer:
+    base_model: "command-r-plus"
+    specialization:
+      - sentiment_extraction
+      - event_detection
+      - impact_assessment
+
+# Model Serving Configuration
+serving:
+  # vLLM for high-performance inference
+  vllm:
+    enabled: true
+    tensor_parallel: 4  # For multi-GPU
+    pipeline_parallel: 2
+    max_batch_size: 32
+    gpu_memory_utilization: 0.95
+  
+  # TensorRT-LLM for optimization
+  tensorrt:
+    enabled: true
+    optimize_for: "latency"  # or "throughput"
+    precision: "int8"  # or "fp16"
+  
+  # Ollama for easy deployment
+  ollama:
+    enabled: true
+    models:
+      - "deepseek-v3:latest"
+      - "llama3.3:70b"
+      - "qwen2.5:72b"
+      - "mixtral:8x22b"
+    
+  # Text Generation Inference (TGI)
+  tgi:
+    enabled: true
+    sharded: true
+    quantization: "bitsandbytes"
+
+# Resource Allocation
+resources:
+  # Minimum production requirements
+  minimum:
+    cpus: 32
+    ram: "256GB"
+    gpus: 2  # A100 80GB or better
+    storage: "2TB"  # NVMe SSD
+  
+  # Recommended for optimal performance
+  recommended:
+    cpus: 64
+    ram: "512GB"
+    gpus: 4  # A100 80GB
+    storage: "4TB"  # NVMe SSD
+  
+  # GPU recommendations
+  gpu_options:
+    nvidia:
+      - "A100 80GB"  # Best performance
+      - "H100 80GB"  # Latest generation
+      - "A6000 48GB" # Good alternative
+      - "RTX 4090 24GB"  # Budget option (multiple needed)
+    amd:
+      - "MI300X"  # Alternative to A100
+
+# Model Selection Strategy
+selection_strategy:
+  # Use local models primarily
+  primary: "local"
+  
+  # Fallback to cloud for complex queries
+  fallback: "cloud"
+  
+  # Model routing based on task
+  routing:
+    technical_analysis: ["qwen2.5-72b", "llama-3.3-70b"]
+    fundamental_analysis: ["deepseek-v3", "gpt-4o"]
+    risk_assessment: ["llama-3.3-70b", "claude-3.5-sonnet"]
+    news_analysis: ["command-r-plus", "fingpt"]
+    time_series: ["timegpt", "chronos"]
+    options_pricing: ["deepseek-v3", "fingpt"]
+    
+  # Load balancing
+  load_balancing:
+    strategy: "round_robin"  # or "least_loaded", "performance_based"
+    health_check_interval: 30  # seconds
+    
+# Fine-tuning Configuration
+fine_tuning:
+  enabled: true
+  base_models:
+    - "llama-3.3-70b"
+    - "qwen2.5-72b"
+  
+  datasets:
+    - name: "financial_reports"
+      size: "100GB"
+      source: "sec_filings"
+    - name: "market_data"
+      size: "500GB"
+      source: "historical_trades"
+    - name: "news_sentiment"
+      size: "50GB"
+      source: "financial_news"
+  
+  training:
+    method: "qlora"  # Quantized LoRA for efficiency
+    rank: 64
+    alpha: 128
+    dropout: 0.1
+    learning_rate: 2e-4
+    batch_size: 4
+    gradient_accumulation: 8
+    
+# Monitoring and Metrics
+monitoring:
+  prometheus:
+    enabled: true
+    metrics:
+      - inference_latency
+      - tokens_per_second
+      - memory_usage
+      - queue_depth
+  
+  logging:
+    level: "INFO"
+    structured: true
+    
+  alerting:
+    high_latency: 5000  # ms
+    low_throughput: 10  # tokens/sec
+    memory_threshold: 0.9  # 90% usage

@@ -143,7 +143,7 @@ download_dev_models() {
     info "Downloading development models..."
     
     # Download smaller models for development/testing
-    # These are much smaller than production models
+    warn "These are development models. For production, use download_production_models()"
     
     info "Downloading Llama 3.2 3B for testing..."
     ollama pull llama3.2:3b
@@ -151,7 +151,55 @@ download_dev_models() {
     info "Downloading Qwen2.5 7B for testing..."  
     ollama pull qwen2.5:7b
     
+    info "Downloading Phi-3 for lightweight testing..."
+    ollama pull phi3:medium
+    
     success "Development models downloaded"
+}
+
+# Download production models (full-size, high-performance)
+download_production_models() {
+    info "Downloading production models..."
+    warn "This requires significant bandwidth and storage (200GB+)"
+    
+    # Check available space
+    AVAILABLE_SPACE=$(df -BG /mnt/fastdrive 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "0")
+    if [ "$AVAILABLE_SPACE" -lt 200 ]; then
+        error "Insufficient disk space. Need at least 200GB, found ${AVAILABLE_SPACE}GB"
+    fi
+    
+    # Llama 3.3 70B - Latest and greatest from Meta
+    info "Downloading Llama 3.3 70B (40GB)..."
+    ollama pull llama3.3:70b-instruct-q4_K_M
+    
+    # Qwen 2.5 72B - Excellent for financial analysis
+    info "Downloading Qwen 2.5 72B (40GB)..."
+    ollama pull qwen2.5:72b-instruct-q4_K_M
+    
+    # DeepSeek V3 - State-of-the-art reasoning (if available)
+    info "Checking for DeepSeek V3..."
+    if ollama list | grep -q "deepseek-v3"; then
+        info "DeepSeek V3 available, downloading..."
+        ollama pull deepseek-v3:latest
+    else
+        warn "DeepSeek V3 not yet available in Ollama, check later"
+    fi
+    
+    # Mixtral 8x22B - MoE for efficiency
+    info "Downloading Mixtral 8x22B MoE (80GB)..."
+    ollama pull mixtral:8x22b-instruct-v0.1-q4_K_M
+    
+    # Command-R - Good for retrieval
+    info "Downloading Command-R 35B (20GB)..."
+    ollama pull command-r:35b-v0.1-q4_K_M
+    
+    # Solar 10.7B - Efficient and capable
+    info "Downloading Solar 10.7B (6GB)..."
+    ollama pull solar:10.7b-instruct-v1-q5_K_M
+    
+    success "Production models downloaded"
+    info "Total models available:"
+    ollama list
 }
 
 # Create systemd service (optional)
@@ -210,20 +258,42 @@ main() {
     info "Starting Ollama setup for AI Trading System"
     info "Log file: $LOG_FILE"
     
+    # Parse arguments
+    PRODUCTION_MODE=false
+    if [ "$1" == "--production" ]; then
+        PRODUCTION_MODE=true
+        info "Running in PRODUCTION mode"
+    fi
+    
     check_requirements
     install_ollama
     configure_ollama
     start_ollama_service
-    download_dev_models
+    
+    # Download appropriate models
+    if [ "$PRODUCTION_MODE" == true ]; then
+        download_production_models
+    else
+        download_dev_models
+    fi
+    
     create_systemd_service
     test_installation
     
     success "Ollama setup completed successfully!"
     info "Next steps:"
-    info "1. Models are available for development testing"
-    info "2. For production, download full-size models using ollama pull"
-    info "3. Configure model-server service to use Ollama endpoints"
-    info "4. Monitor resource usage during model loading"
+    
+    if [ "$PRODUCTION_MODE" == true ]; then
+        info "1. Production models are ready for use"
+        info "2. Configure vLLM or TGI for optimized inference"
+        info "3. Set up model routing in production-models.yaml"
+        info "4. Monitor GPU memory and performance metrics"
+    else
+        info "1. Development models are ready for testing"
+        info "2. For production, run: $0 --production"
+        info "3. Configure model-server service to use Ollama endpoints"
+        info "4. Monitor resource usage during model loading"
+    fi
 }
 
 # Execute main function

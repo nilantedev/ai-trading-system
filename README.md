@@ -143,8 +143,9 @@ An enterprise-grade, AI-powered options trading system with comprehensive securi
    # Run database migrations
    make migrate
    
-   # Initialize admin user
-   python scripts/init_database.py
+   # Initialize admin user (creates secure password)
+   python scripts/create_user_tables.py
+   # Password will be saved to scripts/.admin_password
    ```
 
 4. **Start Services**

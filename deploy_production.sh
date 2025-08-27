@@ -140,7 +140,7 @@ done
 
 # Allow either legacy or runtime SBOM generator presence when SBOM enabled
 if [ "$GENERATE_SBOM" = true ]; then
-    if [ ! -f scripts/generate_sbom.py ] && [ ! -f scripts/runtime/generate_sbom.py ]; then
+    if [ ! -f scripts/generate_sbom.py ]; then
         log_warning "SBOM generation enabled but no generator script found (continuing without SBOM)"
         GENERATE_SBOM=false
     fi
@@ -357,8 +357,8 @@ log_info "✓ Deployment completed on server"
 
 if [ "$GENERATE_SBOM" = true ]; then
     log_info "Generating SBOM locally..."
-    if [ -f scripts/runtime/generate_sbom.py ]; then
-        python scripts/runtime/generate_sbom.py || log_warning "SBOM generation failed (continuing)"
+    if [ -f scripts/generate_sbom.py ]; then
+        python scripts/generate_sbom.py || log_warning "SBOM generation failed (continuing)"
     elif [ -f scripts/generate_sbom.py ]; then
         python scripts/generate_sbom.py || log_warning "SBOM generation failed (continuing)"
     else
@@ -392,7 +392,7 @@ log_info "Env hash (sanitized): ${ENV_HASH:-n/a}"
 
 # Emit deployment structured event (runtime first)
 ssh "$SERVER_USER@$SERVER_HOST" "bash -c '
-EVT_SCRIPT="$DEPLOYMENT_PATH/releases/$TIMESTAMP/scripts/runtime/emit_deployment_event.py"
+EVT_SCRIPT="$DEPLOYMENT_PATH/releases/$TIMESTAMP/scripts/emit_deployment_event.py"
 if [ ! -f "$EVT_SCRIPT" ]; then EVT_SCRIPT="$DEPLOYMENT_PATH/releases/$TIMESTAMP/scripts/emit_deployment_event.py"; fi
 SBOM_HASH_FILE="$DEPLOYMENT_PATH/releases/$TIMESTAMP/sbom/sbom.sha256"
 SBOM_HASH=$(cat "$SBOM_HASH_FILE" 2>/dev/null | awk '{print $1}')
@@ -431,9 +431,9 @@ if [ "$VULN_SCAN" = true ]; then
         fi
     else
         # Fallback to runtime security scan script if present
-        if [ -f scripts/runtime/security_scan.py ]; then
-            log_info "Using fallback runtime security scan script"
-            python scripts/runtime/security_scan.py ai-trading-system:latest || log_warning "Runtime security scan script issues"
+        if [ -f scripts/security_scan_local.py ]; then
+            log_info "Using fallback security scan script"
+            python scripts/security_scan_local.py ai-trading-system:latest || log_warning "Security scan script issues"
         else
             log_warning "No vulnerability scanner (trivy/grype) installed locally; skipping"
         fi

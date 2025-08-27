@@ -525,20 +525,22 @@ class UserManager:
             return False
     
     def _hash_password(self, password: str, salt: str) -> str:
-        """Hash password with salt."""
-        if CRYPTO_AVAILABLE:
-            return bcrypt.hashpw((password + salt).encode(), bcrypt.gensalt()).decode()
-        else:
-            # Fallback to SHA-256 (less secure)
-            return hashlib.sha256((password + salt).encode()).hexdigest()
+        """Hash password with salt using bcrypt only."""
+        if not CRYPTO_AVAILABLE:
+            raise RuntimeError(
+                "bcrypt is required for password hashing. "
+                "Install it with: pip install bcrypt"
+            )
+        return bcrypt.hashpw((password + salt).encode(), bcrypt.gensalt()).decode()
     
     def _verify_password(self, password: str, hash: str, salt: str) -> bool:
-        """Verify password against hash."""
-        if CRYPTO_AVAILABLE:
-            return bcrypt.checkpw((password + salt).encode(), hash.encode())
-        else:
-            # Fallback verification
-            return hashlib.sha256((password + salt).encode()).hexdigest() == hash
+        """Verify password against hash using bcrypt only."""
+        if not CRYPTO_AVAILABLE:
+            raise RuntimeError(
+                "bcrypt is required for password verification. "
+                "Install it with: pip install bcrypt"
+            )
+        return bcrypt.checkpw((password + salt).encode(), hash.encode())
     
     def _is_valid_email(self, email: str) -> bool:
         """Basic email validation."""
@@ -815,7 +817,18 @@ async def create_default_admin_user():
             created_by="system"
         )
         
-        logger.warning(f"Created default admin user with password: {admin_password}")
+        # Save credentials to secure file instead of logging
+        import os
+        cred_file = os.path.join("/tmp", ".admin_init_credentials")
+        with open(cred_file, 'w') as f:
+            f.write(f"Admin user created\n")
+            f.write(f"Username: admin\n")
+            f.write(f"Email: {admin_email}\n")
+            f.write(f"Password: {admin_password}\n")
+            f.write("\n⚠️  CHANGE THIS PASSWORD IMMEDIATELY!\n")
+        os.chmod(cred_file, 0o600)
+        
+        logger.warning(f"Created default admin user - credentials saved to: {cred_file}")
         logger.warning("Please change this password immediately!")
         
         return admin_user

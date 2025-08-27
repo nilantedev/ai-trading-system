@@ -6,6 +6,7 @@ Simple script to create user management tables.
 import os
 import sys
 import logging
+from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
@@ -231,11 +232,22 @@ def create_default_admin_user():
             user_id = str(uuid.uuid4())
             username = "admin"
             email = "admin@trading-system.local"
-            password = "TradingAdmin2024!"  # Change this in production!
-            salt = secrets.token_hex(32)
             
-            # Simple password hashing (in production use bcrypt)
-            password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+            # Generate secure random password
+            import string
+            password_chars = string.ascii_letters + string.digits + string.punctuation
+            password = ''.join(secrets.choice(password_chars) for _ in range(20))
+            
+            # Use bcrypt for secure password hashing (required)
+            try:
+                from passlib.context import CryptContext
+                pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+                password_hash = pwd_context.hash(password)
+                salt = ""  # bcrypt includes salt in the hash
+            except ImportError:
+                logger.error("❌ bcrypt is required for secure password hashing")
+                logger.error("   Install with: pip install passlib[bcrypt]")
+                raise RuntimeError("bcrypt is required for password hashing")
             
             conn.execute(text("""
                 INSERT INTO users (
@@ -253,10 +265,21 @@ def create_default_admin_user():
                 "salt": salt
             })
             
+            # Write password to secure file instead of logging it
+            password_file = os.path.join(os.path.dirname(__file__), ".admin_password")
+            with open(password_file, 'w') as f:
+                f.write(f"Username: {username}\n")
+                f.write(f"Password: {password}\n")
+                f.write(f"Generated at: {datetime.now().isoformat()}\n")
+                f.write("\n⚠️  CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN!\n")
+            
+            # Set restrictive permissions on password file
+            os.chmod(password_file, 0o600)
+            
             logger.info(f"✅ Default admin user created:")
             logger.info(f"   Username: {username}")
-            logger.info(f"   Password: {password}")
-            logger.info("   ⚠️  CHANGE THIS PASSWORD IMMEDIATELY!")
+            logger.info(f"   Password saved to: {password_file}")
+            logger.info("   ⚠️  CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN!")
             
     except Exception as e:
         logger.error(f"Failed to create default admin user: {e}")
