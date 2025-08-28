@@ -1,7 +1,7 @@
 import os
 import asyncio
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 # Ensure development admin password is set before importing the app so auth module initializes
@@ -11,7 +11,8 @@ from api.main import app  # noqa: E402
 
 @pytest.mark.asyncio
 async def test_root():
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/")
     assert resp.status_code == status.HTTP_200_OK
     data = resp.json()
@@ -19,7 +20,8 @@ async def test_root():
 
 @pytest.mark.asyncio
 async def test_health():
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/health")
     assert resp.status_code == status.HTTP_200_OK
     data = resp.json()
@@ -27,7 +29,8 @@ async def test_health():
 
 @pytest.mark.asyncio
 async def test_ready():
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/ready")
     # Ready may be 200 or 503 depending on stubs; accept both, just ensure JSON structure
     assert resp.status_code in {200, 503}
@@ -36,7 +39,8 @@ async def test_ready():
 
 @pytest.mark.asyncio
 async def test_ml_status():
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/ml/status")
     assert resp.status_code == status.HTTP_200_OK
     assert "timestamp" in resp.json()
@@ -45,7 +49,8 @@ async def test_ml_status():
 async def test_metrics_available():
     # metrics may not yet be registered if startup event hasn't run; manually trigger startup
     await app.router.startup()
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/metrics")
     # Either success with text/plain metrics or 404 if metrics middleware not loaded in this context
     assert resp.status_code in {200, 404}
@@ -54,6 +59,7 @@ async def test_metrics_available():
 
 @pytest.mark.asyncio
 async def test_correlation_header():
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/")
     assert "X-Correlation-ID" in resp.headers
