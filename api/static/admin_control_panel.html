@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading System - Control Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { background: #f0f2f5; }
+        .control-panel { background: white; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .emergency-stop { 
+            background: #dc3545; 
+            color: white; 
+            padding: 20px; 
+            border-radius: 10px; 
+            font-size: 1.5em;
+            transition: all 0.3s;
+        }
+        .emergency-stop:hover { 
+            background: #c82333; 
+            transform: scale(1.05); 
+            cursor: pointer;
+        }
+        .mode-selector { padding: 10px; border-radius: 5px; }
+        .mode-stopped { background: #dc3545; color: white; }
+        .mode-paper { background: #17a2b8; color: white; }
+        .mode-conservative { background: #28a745; color: white; }
+        .mode-normal { background: #007bff; color: white; }
+        .mode-aggressive { background: #fd7e14; color: white; }
+        .limit-slider { width: 100%; }
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: inline-block;
+            animation: pulse 2s infinite;
+        }
+        .status-active { background: #28a745; }
+        .status-inactive { background: #dc3545; }
+        .status-warning { background: #ffc107; }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .metric-display {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        .control-group {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1 class="mb-4">
+            <i class="fas fa-shield-alt"></i> Trading System Control Panel
+            <span id="status" class="status-indicator status-active float-end"></span>
+        </h1>
+
+        <!-- Emergency Stop -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="emergency-stop text-center" onclick="emergencyStop()">
+                    <i class="fas fa-hand-paper"></i> EMERGENCY STOP
+                    <div class="small">Click to immediately halt all trading</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Controls -->
+        <div class="control-panel p-4">
+            <!-- Trading Mode -->
+            <div class="control-group">
+                <h4><i class="fas fa-sliders-h"></i> Trading Mode</h4>
+                <div class="btn-group w-100" role="group">
+                    <button class="btn mode-stopped" onclick="setMode('stopped')">
+                        <i class="fas fa-stop"></i> Stopped
+                    </button>
+                    <button class="btn mode-paper" onclick="setMode('paper')">
+                        <i class="fas fa-file-alt"></i> Paper
+                    </button>
+                    <button class="btn mode-conservative" onclick="setMode('conservative')">
+                        <i class="fas fa-shield-virus"></i> Conservative
+                    </button>
+                    <button class="btn mode-normal" onclick="setMode('normal')">
+                        <i class="fas fa-balance-scale"></i> Normal
+                    </button>
+                    <button class="btn mode-aggressive" onclick="setMode('aggressive')">
+                        <i class="fas fa-rocket"></i> Aggressive
+                    </button>
+                </div>
+                <div class="mt-2">
+                    <small>Current Mode: <span id="current-mode" class="badge bg-info">Paper</span></small>
+                </div>
+            </div>
+
+            <!-- Position Limits -->
+            <div class="control-group">
+                <h4><i class="fas fa-dollar-sign"></i> Position Limits</h4>
+                <div class="row">
+                    <div class="col-md-6">
+                        <label>Max Position Size: $<span id="max-position-value">1000</span></label>
+                        <input type="range" class="limit-slider" id="max-position" 
+                               min="100" max="10000" step="100" value="1000"
+                               onchange="updateLimit('max_position_size', this.value)">
+                    </div>
+                    <div class="col-md-6">
+                        <label>Max Portfolio Value: $<span id="max-portfolio-value">10000</span></label>
+                        <input type="range" class="limit-slider" id="max-portfolio"
+                               min="1000" max="100000" step="1000" value="10000"
+                               onchange="updateLimit('max_portfolio_value', this.value)">
+                    </div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-6">
+                        <label>Max Daily Loss: $<span id="max-loss-value">500</span></label>
+                        <input type="range" class="limit-slider" id="max-loss"
+                               min="50" max="5000" step="50" value="500"
+                               onchange="updateLimit('max_daily_loss', this.value)">
+                    </div>
+                    <div class="col-md-6">
+                        <label>Max Open Positions: <span id="max-positions-value">5</span></label>
+                        <input type="range" class="limit-slider" id="max-positions"
+                               min="1" max="20" step="1" value="5"
+                               onchange="updateLimit('max_open_positions', this.value)">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Controls -->
+            <div class="control-group">
+                <h4><i class="fas fa-exclamation-triangle"></i> Risk Controls</h4>
+                <div class="row">
+                    <div class="col-md-4">
+                        <label>Stop Loss: <span id="stop-loss-value">2</span>%</label>
+                        <input type="range" class="limit-slider" id="stop-loss"
+                               min="0.5" max="10" step="0.5" value="2"
+                               onchange="updateLimit('stop_loss_pct', this.value/100)">
+                    </div>
+                    <div class="col-md-4">
+                        <label>Take Profit: <span id="take-profit-value">5</span>%</label>
+                        <input type="range" class="limit-slider" id="take-profit"
+                               min="1" max="20" step="0.5" value="5"
+                               onchange="updateLimit('take_profit_pct', this.value/100)">
+                    </div>
+                    <div class="col-md-4">
+                        <label>Max Drawdown: <span id="max-drawdown-value">10</span>%</label>
+                        <input type="range" class="limit-slider" id="max-drawdown"
+                               min="5" max="30" step="1" value="10"
+                               onchange="updateLimit('max_drawdown_pct', this.value/100)">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trading Hours -->
+            <div class="control-group">
+                <h4><i class="fas fa-clock"></i> Trading Schedule</h4>
+                <div class="row">
+                    <div class="col-md-3">
+                        <label>Start Time</label>
+                        <input type="time" class="form-control" id="start-time" value="09:30"
+                               onchange="updateLimit('trading_start_time', this.value)">
+                    </div>
+                    <div class="col-md-3">
+                        <label>End Time</label>
+                        <input type="time" class="form-control" id="end-time" value="16:00"
+                               onchange="updateLimit('trading_end_time', this.value)">
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check mt-4">
+                            <input class="form-check-input" type="checkbox" id="auto-close"
+                                   onchange="updateLimit('auto_close_at_eod', this.checked)" checked>
+                            <label class="form-check-label">Auto-close at EOD</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check mt-4">
+                            <input class="form-check-input" type="checkbox" id="weekend-trading"
+                                   onchange="updateLimit('trade_on_weekends', this.checked)">
+                            <label class="form-check-label">Weekend Trading</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Symbol Management -->
+            <div class="control-group">
+                <h4><i class="fas fa-list"></i> Symbol Management</h4>
+                <div class="row">
+                    <div class="col-md-6">
+                        <label>Allowed Symbols</label>
+                        <input type="text" class="form-control" id="allowed-symbols" 
+                               value="SPY,QQQ,AAPL,MSFT" placeholder="Comma-separated symbols">
+                        <button class="btn btn-sm btn-primary mt-2" onclick="updateSymbols('allowed')">
+                            Update Allowed
+                        </button>
+                    </div>
+                    <div class="col-md-6">
+                        <label>Blocked Symbols</label>
+                        <input type="text" class="form-control" id="blocked-symbols" 
+                               value="" placeholder="Comma-separated symbols">
+                        <button class="btn btn-sm btn-danger mt-2" onclick="updateSymbols('blocked')">
+                            Update Blocked
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Auto-Trading Toggle -->
+            <div class="control-group">
+                <h4><i class="fas fa-robot"></i> Automation Controls</h4>
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="auto-trade"
+                                   onchange="updateLimit('auto_trade_enabled', this.checked)">
+                            <label class="form-check-label">Auto Trading</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="ml-enabled"
+                                   onchange="updateLimit('ml_enabled', this.checked)">
+                            <label class="form-check-label">ML Models</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="require-confirm"
+                                   onchange="updateLimit('require_confirmation', this.checked)" checked>
+                            <label class="form-check-label">Require Confirmation</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="auto-stop"
+                                   onchange="updateLimit('auto_stop_on_disconnect', this.checked)" checked>
+                            <label class="form-check-label">Auto-stop on Disconnect</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Current Status Display -->
+            <div class="control-group">
+                <h4><i class="fas fa-chart-line"></i> Current Status</h4>
+                <div class="row text-center">
+                    <div class="col-md-3">
+                        <div class="metric-display text-primary">
+                            <span id="open-positions">0</span>
+                        </div>
+                        <small>Open Positions</small>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="metric-display text-success">
+                            $<span id="daily-pnl">0</span>
+                        </div>
+                        <small>Daily P&L</small>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="metric-display text-info">
+                            <span id="win-rate">0</span>%
+                        </div>
+                        <small>Win Rate</small>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="metric-display text-warning">
+                            <span id="orders-today">0</span>
+                        </div>
+                        <small>Orders Today</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/v1';
+        
+        async function emergencyStop() {
+            if (confirm('Are you sure you want to STOP ALL TRADING?')) {
+                const response = await fetch(`${API_BASE}/governor/emergency-stop`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({reason: 'Manual emergency stop from admin panel'})
+                });
+                const data = await response.json();
+                alert(`System stopped: ${data.reason}`);
+                loadCurrentState();
+            }
+        }
+        
+        async function setMode(mode) {
+            const response = await fetch(`${API_BASE}/governor/mode`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: mode})
+            });
+            loadCurrentState();
+        }
+        
+        async function updateLimit(key, value) {
+            // Update display
+            if (key === 'max_position_size') document.getElementById('max-position-value').textContent = value;
+            if (key === 'max_portfolio_value') document.getElementById('max-portfolio-value').textContent = value;
+            if (key === 'max_daily_loss') document.getElementById('max-loss-value').textContent = value;
+            if (key === 'max_open_positions') document.getElementById('max-positions-value').textContent = value;
+            if (key === 'stop_loss_pct') document.getElementById('stop-loss-value').textContent = (value * 100).toFixed(1);
+            if (key === 'take_profit_pct') document.getElementById('take-profit-value').textContent = (value * 100).toFixed(1);
+            if (key === 'max_drawdown_pct') document.getElementById('max-drawdown-value').textContent = (value * 100).toFixed(0);
+            
+            // Send to server
+            const response = await fetch(`${API_BASE}/governor/setting`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({key: key, value: value})
+            });
+        }
+        
+        async function updateSymbols(type) {
+            const inputId = type === 'allowed' ? 'allowed-symbols' : 'blocked-symbols';
+            const symbols = document.getElementById(inputId).value.split(',').map(s => s.trim());
+            const key = type === 'allowed' ? 'allowed_symbols' : 'blocked_symbols';
+            
+            await updateLimit(key, symbols);
+            alert(`${type} symbols updated`);
+        }
+        
+        async function loadCurrentState() {
+            try {
+                const response = await fetch(`${API_BASE}/governor/state`);
+                const state = await response.json();
+                
+                // Update displays
+                document.getElementById('current-mode').textContent = state.mode;
+                document.getElementById('open-positions').textContent = state.current_positions || 0;
+                document.getElementById('daily-pnl').textContent = (state.daily_pnl || 0).toFixed(2);
+                document.getElementById('orders-today').textContent = state.orders_today || 0;
+                
+                // Update status indicator
+                const statusEl = document.getElementById('status');
+                if (state.mode === 'stopped') {
+                    statusEl.className = 'status-indicator status-inactive';
+                } else if (state.auto_trading) {
+                    statusEl.className = 'status-indicator status-active';
+                } else {
+                    statusEl.className = 'status-indicator status-warning';
+                }
+                
+                // Update form values from state
+                if (state.settings) {
+                    document.getElementById('auto-trade').checked = state.settings.auto_trade_enabled;
+                    document.getElementById('ml-enabled').checked = state.settings.ml_enabled;
+                    // ... update other controls
+                }
+            } catch (error) {
+                console.error('Error loading state:', error);
+            }
+        }
+        
+        // Auto-refresh every 5 seconds
+        setInterval(loadCurrentState, 5000);
+        
+        // Initial load
+        loadCurrentState();
+    </script>
+</body>
+</html>

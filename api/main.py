@@ -5,6 +5,8 @@ Consolidated startup/shutdown events and proper middleware ordering.
 """
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -488,6 +490,8 @@ async def root():
             "redoc": "/redoc",
             "openapi": "/openapi.json"
         },
+        "control_panel": "/control",
+        "admin_panel": "/admin",
         "endpoints": {
             "health": "/health",
             "api_v1": "/api/v1",
@@ -495,6 +499,40 @@ async def root():
             "metrics": "/metrics"
         }
     }
+
+
+# Control Panel endpoint
+@app.get("/control", response_class=HTMLResponse)
+async def control_panel():
+    """Serve the trading control panel for unattended operation management"""
+    import os
+    file_path = os.path.join(os.path.dirname(__file__), "static", "admin_control_panel.html")
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        return HTMLResponse(content="""
+            <h1>Control Panel Not Found</h1>
+            <p>Please ensure admin_control_panel.html is deployed to api/static/</p>
+            <p><a href="/docs">API Documentation</a></p>
+        """)
+
+
+# Admin Panel endpoint
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel():
+    """Serve the admin dashboard"""
+    import os
+    file_path = os.path.join(os.path.dirname(__file__), "static", "admin.html")
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        return HTMLResponse(content="""
+            <h1>Admin Panel Not Found</h1>
+            <p>Please ensure admin.html is deployed to api/static/</p>
+            <p><a href="/control">Control Panel</a> | <a href="/docs">API Documentation</a></p>
+        """)
 
 
 # Readiness endpoint (internal operational readiness)
@@ -668,6 +706,14 @@ try:
     app.include_router(portfolio.router, prefix="/api/v1", tags=["Portfolio"])
     app.include_router(system.router, prefix="/api/v1", tags=["System"])
     app.include_router(websocket.router, tags=["WebSocket"])
+    
+    # Governor control panel router
+    try:
+        from api.routers import governor
+        app.include_router(governor.router, tags=["Governor Control"])
+        logger.info("Governor control panel endpoints loaded")
+    except ImportError:
+        logger.warning("Governor router not available - control panel disabled")
     
     logger.info("✅ All API routers loaded")
 except ImportError as e:
