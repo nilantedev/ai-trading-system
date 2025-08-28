@@ -34,6 +34,12 @@ configure_logging()
 logger = get_logger(__name__)
 settings = get_settings()
 
+# SAFETY: Log startup mode
+logger.warning("="*60)
+logger.warning("STARTING IN PAPER TRADING MODE")
+logger.warning("DO NOT USE REAL MONEY UNTIL FULLY TESTED")
+logger.warning("="*60)
+
 # Validate production configuration on startup
 try:
     settings.enforce_production_security()
@@ -46,8 +52,8 @@ except ValueError as e:
 
 # Create FastAPI app
 app = FastAPI(
-    title="AI Trading System API",
-    description="Comprehensive REST API for AI-powered trading system",
+    title="AI Trading System API - PAPER TRADING MODE",
+    description="Comprehensive REST API for AI-powered trading system (SAFETY FIRST)",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",

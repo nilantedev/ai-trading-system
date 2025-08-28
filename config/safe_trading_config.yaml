@@ -1,0 +1,119 @@
+# Safe Trading Configuration
+# This configuration ensures safe operation for paper trading
+# with the ability to transition to real money after testing
+
+trading_mode: paper  # NEVER change to 'live' until fully tested
+
+# Safety Settings (Conservative defaults)
+safety:
+  kill_switch_enabled: true
+  require_confirmation_for_orders: true
+  auto_trade_enabled: false  # Must be manually enabled
+  emergency_stop_on_errors: true
+  
+# Risk Limits (Start VERY conservative)
+risk_limits:
+  mode: conservative  # Options: paper, conservative, normal, aggressive
+  max_position_size_usd: 1000  # Start small
+  max_portfolio_value_usd: 10000
+  max_daily_loss_usd: 200  # Tight stop
+  max_open_positions: 5
+  max_orders_per_minute: 2
+  max_orders_per_day: 50
+  stop_loss_percentage: 2.0  # 2% stop loss
+  position_size_percentage: 2.0  # 2% of portfolio per position
+
+# Data Validation
+data_validation:
+  enabled: true
+  reject_stale_data: true
+  max_data_age_seconds: 60
+  validate_all_ticks: true
+  halt_on_invalid_data: true
+
+# Model Settings
+ml_settings:
+  enabled: false  # Start without ML
+  drift_monitoring_enabled: true
+  confidence_threshold: 0.8
+  fallback_to_simple_strategy: true
+  retrain_on_drift: false  # Manual retraining only
+
+# Audit Settings
+audit:
+  enabled: true
+  log_all_orders: true
+  log_all_trades: true
+  log_all_errors: true
+  immutable_trail: true
+  compliance_mode: true
+
+# Paper Trading Settings
+paper_trading:
+  starting_capital: 100000
+  realistic_slippage: true
+  include_transaction_costs: true
+  simulate_partial_fills: true
+
+# Transition to Live Checklist (DO NOT SKIP)
+live_trading_requirements:
+  - "All tests passing (100% coverage on critical paths)"
+  - "30 days of profitable paper trading"
+  - "Risk limits tested and verified"
+  - "Kill switch tested under load"
+  - "Data validation catching bad ticks"
+  - "Model drift detection working"
+  - "Audit trail verified immutable"
+  - "Emergency procedures documented"
+  - "Rollback plan in place"
+  - "24/7 monitoring setup"
+  - "Alert system configured"
+  - "Backup systems tested"
+
+# Monitoring
+monitoring:
+  health_check_interval_seconds: 30
+  alert_on_errors: true
+  alert_on_losses: true
+  alert_on_drift: true
+  metrics_enabled: true
+  
+# Allowed Symbols (Start with liquid stocks only)
+allowed_symbols:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - GOOGL
+  
+# Blocked Symbols (High risk)
+blocked_symbols:
+  - Any leveraged ETF
+  - Any inverse ETF
+  - Penny stocks
+  - Crypto-related stocks
+
+# Time Restrictions
+trading_hours:
+  enabled: true
+  start_time: "09:45"  # Start 15 min after open
+  end_time: "15:45"    # End 15 min before close
+  trade_on_weekends: false
+  skip_holidays: true
+
+# Performance Thresholds (When to halt)
+performance_limits:
+  max_consecutive_losses: 5
+  max_drawdown_percentage: 10.0
+  min_win_rate: 0.4
+  min_sharpe_ratio: 0.5
+
+# Startup Checks (Must pass before trading)
+startup_requirements:
+  check_database_connection: true
+  check_redis_connection: true
+  check_market_data_feed: true
+  check_broker_connection: true
+  verify_risk_limits: true
+  verify_audit_trail: true
+  load_test_safety_systems: true

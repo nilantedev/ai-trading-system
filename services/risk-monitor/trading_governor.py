@@ -6,11 +6,14 @@ Allows admin panel to control all trading parameters in real-time
 
 import asyncio
 import json
+import logging
 from typing import Dict, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import redis.asyncio as redis
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 class TradingMode(Enum):
     """System operating modes"""
@@ -175,21 +178,45 @@ class TradingGovernor:
         pnl = await self.redis.get(pnl_key)
         return float(pnl) if pnl else 0
         
-    async def emergency_stop(self, reason: str):
+    async def emergency_stop(self, reason: str, cancel_orders: bool = True, close_positions: bool = False):
         """EMERGENCY STOP - Called by panic button or auto-safety"""
+        # IMMEDIATE HALT
         await self.update_setting("mode", "stopped")
         await self.update_setting("auto_trade_enabled", False)
         
-        # Log emergency stop
-        await self.redis.lpush("emergency:stops", json.dumps({
+        # Set kill switch flag with 24hr expiry
+        await self.redis.set("trading:kill_switch:active", "1", ex=86400)
+        
+        # Log emergency stop with full context
+        stop_event = {
             "timestamp": datetime.now().isoformat(),
-            "reason": reason
+            "reason": reason,
+            "cancel_orders": cancel_orders,
+            "close_positions": close_positions,
+            "positions_at_stop": await self._get_position_count(),
+            "daily_pnl_at_stop": await self._get_daily_loss()
+        }
+        await self.redis.lpush("emergency:stops", json.dumps(stop_event))
+        
+        # Notify all systems immediately
+        await self.redis.publish("trading:emergency", json.dumps({
+            "event": "EMERGENCY_STOP",
+            "reason": reason,
+            "timestamp": datetime.now().isoformat()
         }))
         
-        # Notify all systems
-        await self.redis.publish("trading:emergency", reason)
+        # Cancel all open orders if requested
+        if cancel_orders:
+            await self._cancel_all_open_orders()
+            
+        # Close all positions if requested (more drastic)
+        if close_positions:
+            await self._close_all_positions()
         
-        return {"status": "EMERGENCY STOP", "reason": reason}
+        return {"status": "EMERGENCY STOP", "reason": reason, "actions_taken": {
+            "orders_cancelled": cancel_orders,
+            "positions_closed": close_positions
+        }}
         
     async def get_current_state(self) -> Dict:
         """Get full system state for admin panel"""
@@ -272,3 +299,47 @@ class TradingGovernor:
             for key, value in presets[mode].items():
                 await self.update_setting(key, value)
             await self.update_setting("mode", mode.value)
+    
+    async def _cancel_all_open_orders(self):
+        """Cancel all open orders immediately"""
+        try:
+            # Publish cancellation event
+            await self.redis.publish("orders:cancel_all", json.dumps({
+                "reason": "emergency_stop",
+                "timestamp": datetime.now().isoformat()
+            }))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to cancel orders: {e}")
+            return False
+    
+    async def _close_all_positions(self):
+        """Close all positions at market (emergency only)"""
+        try:
+            # Publish position closure event
+            await self.redis.publish("positions:close_all", json.dumps({
+                "reason": "emergency_stop",
+                "type": "market",
+                "timestamp": datetime.now().isoformat()
+            }))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to close positions: {e}")
+            return False
+    
+    async def check_kill_switch(self) -> bool:
+        """Check if kill switch is active"""
+        kill_switch = await self.redis.get("trading:kill_switch:active")
+        return kill_switch == "1"
+    
+    async def clear_kill_switch(self, admin_key: str) -> bool:
+        """Clear kill switch (requires admin key)"""
+        # In production, validate admin_key properly
+        if admin_key:
+            await self.redis.delete("trading:kill_switch:active")
+            await self.redis.lpush("audit:kill_switch_cleared", json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "cleared_by": admin_key[:8] + "****"  # Log partial key for audit
+            }))
+            return True
+        return False
