@@ -8,8 +8,7 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 
 # Database and Caching
-redis>=5.0.0
-aioredis>=2.0.0
+redis[hiredis]>=5.0.0  # Python 3.13 compatible with async support
 psycopg[binary,pool]>=3.1.0
 asyncpg>=0.29.0
 sqlalchemy[asyncio]>=2.0.0

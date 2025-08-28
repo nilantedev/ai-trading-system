@@ -55,19 +55,19 @@ class CircuitBreaker:
     
     async def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute function through circuit breaker."""
-        async with self._lock:
-            # Check if we should attempt the call
-            if not self._should_attempt_call():
+        # Check state before acquiring lock to avoid blocking
+        current_state = self.state.state
+        
+        if current_state == CircuitState.OPEN:
+            if not self._should_attempt_reset():
                 raise Exception(f"Circuit breaker {self.name} is OPEN")
             
-            # Update state if moving from OPEN to HALF_OPEN
-            if self.state.state == CircuitState.OPEN:
-                if self._should_attempt_reset():
+            # Try to transition to HALF_OPEN
+            async with self._lock:
+                if self.state.state == CircuitState.OPEN and self._should_attempt_reset():
                     self.state.state = CircuitState.HALF_OPEN
                     self.state.success_count = 0
                     logger.info(f"Circuit breaker {self.name} moving to HALF_OPEN")
-                else:
-                    raise Exception(f"Circuit breaker {self.name} is OPEN")
         
         # Attempt the call
         try:

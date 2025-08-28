@@ -12,7 +12,8 @@ from typing import List
 # Add shared library to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared" / "python-common"))
 
-from trading_common.database import get_database_manager, QuestDBOperations
+from trading_common.database_manager import DatabaseManager
+from trading_common.database import QuestDBClient as QuestDBOperations
 from trading_common.cache import get_trading_cache
 from trading_common.models import MarketData, TradingSignal, SignalType, TimeFrame
 from trading_common.logging import get_logger

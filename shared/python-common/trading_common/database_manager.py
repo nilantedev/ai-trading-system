@@ -314,9 +314,10 @@ class RedisOperations:
                 status = await r.get(key)
                 if status:
                     try:
-                        health[component] = eval(status)  # Safe in this context
-                    except:
-                        health[component] = {"status": "unknown"}
+                        import json
+                        health[component] = json.loads(status) if isinstance(status, str) else status
+                    except (json.JSONDecodeError, TypeError):
+                        health[component] = {"status": "unknown", "raw": str(status)}
             return health
 
 

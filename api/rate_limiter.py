@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
 from fastapi import HTTPException, Request, Response
-import aioredis
+import redis.asyncio as redis
 import os
 import json
 

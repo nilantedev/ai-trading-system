@@ -15,10 +15,9 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from api.auth import (
-    authenticate_user, create_access_token, create_refresh_token,
-    verify_access_token, refresh_access_token, revoke_token,
-    check_brute_force, record_failed_login,
-    User, UserRole, TokenData, user_manager
+    authenticate_user, create_access_token,
+    get_auth_manager, get_current_user,
+    User, UserRole
 )
 from fastapi import HTTPException
 

@@ -1,359 +1,319 @@
-# 🚀 AI Trading System - Production Deployment Guide
+# AI Trading System - Complete Deployment Guide
 
-## 🎯 DEPLOYMENT INFORMATION
-**Time Required**: 45-60 minutes  
-**Server**: 168.119.145.135  
-**Domain**: trading.main-nilante.com  
-**User**: nilante  
-**Path**: /srv/trading  
+## Server Requirements
+- **OS**: Ubuntu 24.04 LTS
+- **RAM**: Minimum 32GB (256GB+ recommended for AI models)
+- **Storage**: 100GB+ SSD
+- **Python**: 3.11+ (3.13 compatible)
+- **Ports**: 8000 (API), 5432 (PostgreSQL), 6379 (Redis)
 
----
+## Step-by-Step Deployment Instructions
 
-## ⚡ QUICK START (If you know what you're doing)
+### Step 1: Connect to Your Server
 ```bash
-# 1. SSH to server
-ssh nilante@168.119.145.135
-
-# 2. Clone and deploy
-git clone https://github.com/nilantedev/ai-trading-system.git /srv/trading
-cd /srv/trading
-cp .env.example .env.production
-# [Edit .env.production with secure values]
-pip install -r requirements.txt  # Install dependencies
-./deploy_production.sh --skip-tests
-
-# 3. Setup AI models (optional but recommended)
-cd infrastructure/ai-models
-./ollama-setup.sh --production  # Downloads production AI models
-
-# 4. Verify
-curl http://localhost:8000/health
-```
-
----
-
-## 📋 PHASE 1: PRE-DEPLOYMENT (5 min)
-
-### 1.1 Local Preparation
-```bash
-# Ensure you have SSH access
-ssh nilante@168.119.145.135 "echo 'Connected'"
-
-# Get latest code
-cd ~/main-nilante-server/ai-trading-system
-git pull origin main
-```
-
-### 1.2 Server Access
-```bash
+# From your local machine
 ssh nilante@168.119.145.135
 ```
 
----
-
-## 🔧 PHASE 2: SERVER SETUP (10 min)
-
-### 2.1 Directory Structure
+### Step 2: Install System Dependencies
 ```bash
-# Create deployment directories
-sudo mkdir -p /srv/trading
-sudo mkdir -p /mnt/fastdrive/trading/{questdb,prometheus,grafana,pulsar,weaviate}
-sudo mkdir -p /mnt/bulkdata/trading/{minio,backups}
-sudo chown -R nilante:nilante /srv/trading /mnt/fastdrive/trading /mnt/bulkdata/trading
+# Update system packages
+sudo apt update && sudo apt upgrade -y
 
-# Verify
-df -h | grep -E "(srv|fastdrive|bulkdata)"
+# Install Python 3.11+ and essential tools
+sudo apt install -y python3.11 python3.11-venv python3-pip
+sudo apt install -y git docker.io docker-compose
+sudo apt install -y postgresql-client redis-tools
+sudo apt install -y build-essential libpq-dev
+
+# Add your user to docker group
+sudo usermod -aG docker $USER
+# LOGOUT AND LOGIN AGAIN for group changes to take effect
 ```
 
-### 2.2 System Check
+### Step 3: Clone the Repository
 ```bash
-# Quick system verification
-echo "Python: $(python3 --version)"
-echo "Docker: $(docker --version)"
-echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
-echo "Disk /srv: $(df -h /srv | tail -1 | awk '{print $4}')"
-```
-
----
-
-## 🤖 PHASE 3: AI MODELS (15 min - can run parallel)
-
-### 3.1 Install Ollama
-```bash
-# Install if needed
-if ! command -v ollama &> /dev/null; then
-    curl -fsSL https://ollama.com/install.sh | sh
-    sudo systemctl enable ollama
-    sudo systemctl start ollama
-fi
-
-ollama version
-```
-
-### 3.2 Download Models (PARALLEL - Open 4 SSH sessions)
-```bash
-# Terminal 1
-ollama pull qwen2.5:72b      # 45GB
-
-# Terminal 2  
-ollama pull deepseek-r1:70b  # 42GB
-
-# Terminal 3
-ollama pull llama3.1:70b      # 40GB
-
-# Terminal 4
-ollama pull mixtral:8x7b      # 26GB
-ollama pull phi3:medium       # 7GB
-
-# Verify all models
-ollama list
-```
-
----
-
-## 📦 PHASE 4: CODE DEPLOYMENT (5 min)
-
-### 4.1 Clone Repository
-```bash
+# Create deployment directory
 cd /srv
-sudo rm -rf trading  # Clean slate
-sudo git clone https://github.com/nilantedev/ai-trading-system.git trading
-sudo chown -R nilante:nilante trading
+sudo mkdir trading
+sudo chown $USER:$USER trading
 cd trading
+
+# Clone repository (replace with your actual repo URL)
+git clone https://github.com/YOUR_USERNAME/ai-trading-system.git
+cd ai-trading-system
 ```
 
-### 4.2 Environment Configuration
+### Step 4: Set Up Python Environment
 ```bash
-# Copy template
-cp .env.example .env.production
+# Create virtual environment
+python3.11 -m venv .venv
 
-# Generate ALL passwords at once
-cat > /tmp/passwords.txt << 'EOF'
-DB_PASSWORD=$(openssl rand -base64 32)
-DB_ROOT_PASSWORD=$(openssl rand -base64 32)  
-REDIS_PASSWORD=$(openssl rand -base64 32)
-JWT_SECRET=$(openssl rand -base64 64 | tr -d '\n')
-SECRET_KEY=$(openssl rand -base64 64)
-GRAFANA_PASSWORD=$(openssl rand -base64 24)
-MINIO_ROOT_PASSWORD=$(openssl rand -base64 32)
-BACKUP_ENCRYPTION_KEY=$(openssl rand -base64 32)
-EOF
+# Activate virtual environment
+source .venv/bin/activate
 
-# Execute to generate
-bash /tmp/passwords.txt
+# Upgrade pip
+pip install --upgrade pip
 
-# Edit with generated values
-nano .env.production
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-### 4.3 Required .env.production Settings
-```
-ENVIRONMENT=production
-DEBUG=false
-
-# Database
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=trading_db
-POSTGRES_USER=trading_user
-POSTGRES_PASSWORD=[GENERATED]
-
-# Redis
-REDIS_HOST=redis
-REDIS_PASSWORD=[GENERATED]
-
-# Security
-JWT_SECRET=[GENERATED]
-SECRET_KEY=[GENERATED]
-
-# Monitoring
-GRAFANA_PASSWORD=[GENERATED]
-
-# Domain
-DOMAIN_NAME=trading.main-nilante.com
-LETSENCRYPT_EMAIL=admin@main-nilante.com
-
-# AI (Local)
-OLLAMA_HOST=http://host.docker.internal:11434
-USE_LOCAL_MODELS_ONLY=true
-```
-
----
-
-## 🔒 PHASE 5: SSL & NETWORKING (5 min)
-
-### 5.1 Quick SSL Setup
+### Step 5: Configure Environment Variables
 ```bash
-# Self-signed for immediate deployment
-sudo ./scripts/setup_ssl_certificates.sh --self-signed --domain trading.main-nilante.com
+# Copy environment template
+cp .env.example .env
 
-# Firewall
-sudo ufw allow 22,80,443,8000/tcp
-sudo ufw --force enable
+# Generate secure passwords
+python3 -c "import secrets; print('JWT_SECRET=' + secrets.token_urlsafe(32))" >> .env
+python3 -c "import secrets; print('DB_PASSWORD=' + secrets.token_urlsafe(32))" >> .env
+python3 -c "import secrets; print('REDIS_PASSWORD=' + secrets.token_urlsafe(32))" >> .env
+
+# Edit configuration
+nano .env
+
+# Add your API keys (get from providers):
+# ALPACA_API_KEY=your_key_here
+# ALPACA_SECRET_KEY=your_secret_here
+# POLYGON_API_KEY=your_key_here
+# OPENAI_API_KEY=your_key_here (optional)
 ```
 
-### 5.2 Domain Configuration (if DNS ready)
+### Step 6: Start Docker Services
 ```bash
-./scripts/configure_domain.sh --domain main-nilante.com --subdomain trading --check-dns
-```
+# Start infrastructure services
+docker-compose up -d postgres redis prometheus grafana
 
----
-
-## 🚀 PHASE 6: LAUNCH (10 min)
-
-### 6.1 Deploy
-```bash
-cd /srv/trading
-
-# Option A: Automated deployment
-./deploy_production.sh --skip-tests
-
-# Option B: Manual deployment
-docker-compose down -v  # Clean start
-docker-compose build
-docker-compose up -d postgres redis
+# Wait for services to be healthy (about 30 seconds)
 sleep 30
-docker-compose up -d
-```
 
-### 6.2 Quick Verification
-```bash
-# Check services
+# Check service status
 docker-compose ps
+```
 
-# Test endpoints
+### Step 7: Initialize Database
+```bash
+# Set Python path
+export PYTHONPATH=/srv/trading/ai-trading-system:/srv/trading/ai-trading-system/shared/python-common:/srv/trading/ai-trading-system/services
+
+# Run database migrations
+alembic upgrade head
+
+# Create admin user
+python scripts/create_user_tables.py
+# Note: Save the generated admin password!
+```
+
+### Step 8: Start the Application
+```bash
+# Method 1: Direct start (for testing)
+source .venv/bin/activate
+export PYTHONPATH=/srv/trading/ai-trading-system:/srv/trading/ai-trading-system/shared/python-common:/srv/trading/ai-trading-system/services
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+# Method 2: Production start with systemd (recommended)
+sudo nano /etc/systemd/system/trading-api.service
+```
+
+Add this content to the service file:
+```ini
+[Unit]
+Description=AI Trading System API
+After=network.target
+
+[Service]
+Type=simple
+User=nilante
+WorkingDirectory=/srv/trading/ai-trading-system
+Environment="PYTHONPATH=/srv/trading/ai-trading-system:/srv/trading/ai-trading-system/shared/python-common:/srv/trading/ai-trading-system/services"
+ExecStart=/srv/trading/ai-trading-system/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable trading-api
+sudo systemctl start trading-api
+sudo systemctl status trading-api
+```
+
+### Step 9: Set Up Nginx (Optional but Recommended)
+```bash
+# Install nginx
+sudo apt install -y nginx
+
+# Create configuration
+sudo nano /etc/nginx/sites-available/trading-api
+```
+
+Add this configuration:
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;  # Replace with your domain or IP
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+Enable the site:
+```bash
+sudo ln -s /etc/nginx/sites-available/trading-api /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+```
+
+### Step 10: Verify Deployment
+```bash
+# Check API health
 curl http://localhost:8000/health
-curl http://localhost:8000/ready
-curl http://localhost:8000/metrics | head -5
 
+# Check system status
+python health_check.py
+
+# View logs
+sudo journalctl -u trading-api -f
+
+# Check Docker containers
+docker-compose ps
+```
+
+### Step 11: Configure Firewall
+```bash
+# Allow necessary ports
+sudo ufw allow 22     # SSH
+sudo ufw allow 80     # HTTP
+sudo ufw allow 443    # HTTPS
+sudo ufw allow 8000   # API (if not using nginx)
+sudo ufw enable
+```
+
+### Step 12: Set Up SSL (For Production)
+```bash
+# Install certbot
+sudo apt install -y certbot python3-certbot-nginx
+
+# Get SSL certificate
+sudo certbot --nginx -d your-domain.com
+```
+
+## Post-Deployment Tasks
+
+### 1. Install AI Models (Optional)
+```bash
+# Install Ollama for local LLMs
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Download models (requires significant RAM)
+ollama pull llama3.3:70b  # 48GB RAM required
+ollama pull qwen2.5:72b    # 48GB RAM required
+```
+
+### 2. Set Up Monitoring
+- Access Grafana: `http://your-server:3000` (admin/admin)
+- Access Prometheus: `http://your-server:9090`
+- Import dashboards from `infrastructure/grafana/dashboards/`
+
+### 3. Configure Backup
+```bash
+# Set up automated backups
+crontab -e
+
+# Add daily backup at 2 AM
+0 2 * * * /srv/trading/ai-trading-system/scripts/backup.sh
+```
+
+### 4. Start Trading (Paper Trading First!)
+```bash
+# Enable paper trading in .env
+PAPER_TRADING=true
+
+# Restart service
+sudo systemctl restart trading-api
+
+# Monitor performance
+tail -f logs/trading.log
+```
+
+## Troubleshooting
+
+### If services won't start:
+```bash
 # Check logs
-docker-compose logs --tail=50 api
+docker-compose logs -f
+sudo journalctl -u trading-api -n 100
+
+# Check Python path
+echo $PYTHONPATH
+
+# Test imports
+python -c "from api.main import app; print('Success')"
 ```
 
----
-
-## ✅ PHASE 7: VALIDATION (5 min)
-
-### 7.1 Health Checks
+### If database connection fails:
 ```bash
-# Service status
-echo "=== Service Health ==="
-for service in api postgres redis; do
-    STATUS=$(docker-compose ps $service | grep Up && echo "✓" || echo "✗")
-    echo "$service: $STATUS"
-done
+# Check PostgreSQL
+docker-compose exec postgres psql -U trading_user -d trading_system
 
-# API endpoints
-echo "=== API Health ==="
-curl -s http://localhost:8000/health | jq -r '.status'
-curl -s http://localhost:8000/ready | jq -r '.ready'
+# Check Redis
+redis-cli -h localhost ping
 ```
 
-### 7.2 Database Check
+### If API throws errors:
 ```bash
-# PostgreSQL
-docker-compose exec postgres pg_isready
+# Check dependencies
+pip list | grep -E "fastapi|redis|sqlalchemy"
 
-# Redis
-docker-compose exec redis redis-cli ping
+# Reinstall requirements
+pip install --force-reinstall -r requirements.txt
 ```
 
-### 7.3 AI Model Test
+## Security Checklist
+- [ ] Changed all default passwords
+- [ ] Configured firewall rules
+- [ ] Enabled SSL certificate
+- [ ] Set up regular backups
+- [ ] Configured log rotation
+- [ ] Limited API rate limiting
+- [ ] Enabled audit logging
+
+## Maintenance Commands
 ```bash
-# Test Ollama
-curl -X POST http://localhost:8000/api/v1/ai/test \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"test"}'
+# Update code
+git pull origin main
+pip install -r requirements.txt
+alembic upgrade head
+sudo systemctl restart trading-api
+
+# View logs
+tail -f logs/trading.log
+sudo journalctl -u trading-api -f
+
+# Backup database
+docker-compose exec postgres pg_dump -U trading_user trading_system > backup.sql
+
+# Clean up old logs
+find logs/ -name "*.log" -mtime +30 -delete
 ```
 
----
+## Support
+For issues, check:
+1. Application logs: `/srv/trading/ai-trading-system/logs/`
+2. System logs: `sudo journalctl -u trading-api`
+3. Docker logs: `docker-compose logs`
 
-## 🎯 PHASE 8: GO LIVE
-
-### 8.1 Production Configuration
-```bash
-# Enable production mode
-docker-compose -f docker-compose.yml \
-  -f infrastructure/docker/docker-compose.production.yml up -d
-
-# Setup backups
-sudo ./scripts/setup_backup_cron.sh
-
-# Configure monitoring
-./scripts/setup_monitoring_alerts.sh --email admin@main-nilante.com
-```
-
-### 8.2 Access Points
-- **API**: https://trading.main-nilante.com
-- **Docs**: https://trading.main-nilante.com/docs
-- **Grafana**: https://trading.main-nilante.com/grafana
-- **Health**: https://trading.main-nilante.com/health
-
----
-
-## 🔥 QUICK FIXES
-
-### Container Issues
-```bash
-docker-compose restart [service]
-docker-compose logs --tail=100 [service]
-```
-
-### Database Reset
-```bash
-docker-compose down -v postgres
-docker-compose up -d postgres
-```
-
-### Memory Issues
-```bash
-docker system prune -af
-docker-compose down && docker-compose up -d
-```
-
-### Ollama Issues
-```bash
-sudo systemctl restart ollama
-ollama list
-```
-
----
-
-## ✅ SUCCESS CRITERIA
-- [ ] All containers running: `docker-compose ps`
-- [ ] Health endpoint returns 200: `curl http://localhost:8000/health`
-- [ ] No errors in last 100 log lines: `docker-compose logs --tail=100`
-- [ ] Database connected: `docker-compose exec postgres pg_isready`
-- [ ] Redis responding: `docker-compose exec redis redis-cli ping`
-- [ ] AI models loaded: `ollama list` (shows 5 models)
-
----
-
-## 📱 MONITORING
-```bash
-# Real-time logs
-docker-compose logs -f api
-
-# System metrics
-docker stats
-
-# Service health
-watch -n 5 'docker-compose ps'
-```
-
----
-
-## 🚨 EMERGENCY ROLLBACK
-```bash
-# Complete rollback
-cd /srv/trading
-docker-compose down -v
-git checkout HEAD~1
-docker-compose up -d
-```
-
----
-
-**DEPLOYMENT TIME: 45 minutes** ⏱️
-
-Start with **PHASE 1** now! The system will be live in less than an hour.
+## Ready to Trade!
+Your AI Trading System is now deployed and ready. Start with paper trading to validate the system before enabling live trading.

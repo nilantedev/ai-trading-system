@@ -109,21 +109,21 @@ def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
     avg_loss = np.mean(loss[:period])
     
     rsi_values = [np.nan] * period
-        
-        for i in range(period, len(prices)):
-            if i == period:
-                rs = avg_gain / avg_loss if avg_loss != 0 else 100
-            else:
-                current_gain = gain[i-1]
-                current_loss = loss[i-1]
-                avg_gain = (avg_gain * (period - 1) + current_gain) / period
-                avg_loss = (avg_loss * (period - 1) + current_loss) / period
-                rs = avg_gain / avg_loss if avg_loss != 0 else 100
-                
-            rsi = 100 - (100 / (1 + rs))
-            rsi_values.append(rsi)
+    
+    for i in range(period, len(prices)):
+        if i == period:
+            rs = avg_gain / avg_loss if avg_loss != 0 else 100
+        else:
+            current_gain = gain[i-1]
+            current_loss = loss[i-1]
+            avg_gain = (avg_gain * (period - 1) + current_gain) / period
+            avg_loss = (avg_loss * (period - 1) + current_loss) / period
+            rs = avg_gain / avg_loss if avg_loss != 0 else 100
             
-        return rsi_values
+        rsi = 100 - (100 / (1 + rs))
+        rsi_values.append(rsi)
+        
+    return rsi_values
     
     # Test with sample data
     sample_prices = [100.0, 101.2, 99.8, 102.5, 103.1, 101.9, 104.2, 105.8, 103.4, 106.1]
@@ -161,8 +161,3 @@ def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
     
     print("\n🚀 Production Readiness Status: SIGNIFICANTLY IMPROVED")
     print("The Intelligence/Models layer now meets enterprise-grade standards!")
-    
-except Exception as e:
-    print(f"❌ Error during testing: {e}")
-    import traceback
-    traceback.print_exc()

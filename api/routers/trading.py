@@ -48,64 +48,16 @@ async def get_current_signals(
         # Import signal generation service
         from services.signal_generator.signal_generation_service import get_signal_service
         
-        # Mock signals data for demonstration
-        mock_signals = [
-            TradingSignal(
-                symbol="AAPL",
-                signal_type=SignalType.BUY,
-                confidence=0.85,
-                strength=0.75,
-                price_target=155.0,
-                stop_loss=145.0,
-                take_profit=160.0,
-                strategy_name="momentum_strategy",
-                reasoning="Strong momentum breakout above resistance with high volume",
-                timestamp=datetime.utcnow() - timedelta(minutes=5),
-                risk_level=RiskLevel.MEDIUM
-            ),
-            TradingSignal(
-                symbol="TSLA",
-                signal_type=SignalType.SELL,
-                confidence=0.78,
-                strength=0.68,
-                price_target=240.0,
-                stop_loss=260.0,
-                take_profit=220.0,
-                strategy_name="rsi_mean_reversion",
-                reasoning="RSI overbought condition with bearish divergence",
-                timestamp=datetime.utcnow() - timedelta(minutes=10),
-                risk_level=RiskLevel.HIGH
-            ),
-            TradingSignal(
-                symbol="SPY",
-                signal_type=SignalType.HOLD,
-                confidence=0.65,
-                strength=0.45,
-                price_target=None,
-                stop_loss=None,
-                take_profit=None,
-                strategy_name="ma_crossover",
-                reasoning="Mixed signals, waiting for clearer trend direction",
-                timestamp=datetime.utcnow() - timedelta(minutes=15),
-                risk_level=RiskLevel.LOW
-            ),
-            TradingSignal(
-                symbol="GOOGL",
-                signal_type=SignalType.BUY,
-                confidence=0.92,
-                strength=0.88,
-                price_target=145.0,
-                stop_loss=130.0,
-                take_profit=155.0,
-                strategy_name="breakout_strategy",
-                reasoning="Bullish breakout above key resistance with volume confirmation",
-                timestamp=datetime.utcnow() - timedelta(minutes=3),
-                risk_level=RiskLevel.MEDIUM
-            )
-        ]
+        # Get real signals from service
+        try:
+            signal_service = await get_signal_service()
+            all_signals = await signal_service.get_current_signals()
+        except Exception as e:
+            logger.warning(f"Signal service unavailable: {e}, returning empty list")
+            all_signals = []
         
-        # Apply filters
-        filtered_signals = mock_signals
+        # Convert to response format
+        filtered_signals = all_signals
         
         if symbol:
             filtered_signals = [s for s in filtered_signals if s.symbol == symbol.upper()]
@@ -163,28 +115,14 @@ async def get_symbol_signals(
         
         try:
             signal_service = await get_signal_service()
-            # In production: signals = await signal_service.get_symbol_signals(symbol, hours)
+            signals = await signal_service.get_symbol_signals(symbol, hours)
         except Exception as e:
             logger.warning(f"Failed to get signal service: {e}")
+            signals = []
         
-        # Mock symbol-specific signals
+        # Use real signals
         cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        
-        mock_signals = [
-            TradingSignal(
-                symbol=symbol,
-                signal_type=SignalType.BUY,
-                confidence=0.85,
-                strength=0.75,
-                price_target=155.0,
-                stop_loss=145.0,
-                take_profit=160.0,
-                strategy_name="momentum_strategy",
-                reasoning=f"Strong momentum breakout for {symbol} with volume confirmation",
-                timestamp=datetime.utcnow() - timedelta(minutes=30),
-                risk_level=RiskLevel.MEDIUM
-            )
-        ]
+        mock_signals = signals
         
         # Filter by strategy if specified
         if strategy:
@@ -224,14 +162,10 @@ async def place_order(
         # Import order management system
         from services.execution.order_management_system import get_order_management_system
         
-        try:
-            oms = await get_order_management_system()
-            # In production: order = await oms.place_order(order_request, user)
-        except Exception as e:
-            logger.warning(f"Failed to get order management system: {e}")
+        oms = await get_order_management_system()
         
-        # Create mock order
-        order_id = f"ORD_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        # Place real order through OMS
+        order = await oms.place_order(order_request, user)
         
         mock_order = Order(
             order_id=order_id,

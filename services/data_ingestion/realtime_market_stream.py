@@ -16,7 +16,7 @@ from collections import deque
 
 import websockets
 from websockets.client import WebSocketClientProtocol
-import aioredis
+import redis.asyncio as aioredis
 from prometheus_client import Counter, Gauge, Histogram
 import pandas as pd
 

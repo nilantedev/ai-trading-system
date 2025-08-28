@@ -14,7 +14,7 @@ import logging
 from collections import defaultdict
 
 from pydantic import BaseModel
-import aioredis
+import redis.asyncio as aioredis
 from prometheus_client import Counter, Gauge, Histogram
 import pandas as pd
 

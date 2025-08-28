@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Any
 import logging
 from collections import deque, defaultdict
 
-import aioredis
+import redis.asyncio as aioredis
 from prometheus_client import Counter, Gauge, Histogram, Summary, Info
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi import FastAPI, Response

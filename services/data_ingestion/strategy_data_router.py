@@ -13,7 +13,7 @@ from enum import Enum
 import logging
 from collections import defaultdict
 
-import aioredis
+import redis.asyncio as aioredis
 from prometheus_client import Counter, Gauge, Histogram
 import pandas as pd
 import numpy as np

@@ -13,7 +13,7 @@ import secrets
 import hashlib
 import hmac
 import asyncio
-import aioredis
+import redis.asyncio as redis
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
