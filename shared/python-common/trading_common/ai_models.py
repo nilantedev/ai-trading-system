@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from dataclasses import dataclass
+import os
 from enum import Enum
 
 import httpx
@@ -48,18 +49,28 @@ class BaseModelClient:
 class OllamaClient(BaseModelClient):
     """Ollama local model client with advanced models."""
     
-    def __init__(self, base_url: str = "http://localhost:11434"):
+    def __init__(self, base_url: str = None):
+        # Prefer explicit env; fall back to container DNS (ollama)
+        if base_url is None:
+            env_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+            if env_url and env_url.startswith("http"):
+                base_url = env_url
+            elif env_url:
+                base_url = f"http://{env_url}:11434"
+            else:
+                base_url = "http://ollama:11434"
         self.base_url = base_url
         self.client = httpx.AsyncClient(timeout=60.0)  # Increased timeout for large models
         # Default to powerful open-source models
+        # Default model mapping aligned with installed models (2025-09-05)
         self.default_models = {
-            "analysis": "qwen2.5:72b",  # Powerful analysis model
-            "risk": "deepseek-r1:70b",  # Risk assessment
-            "strategy": "llama3.1:70b",  # Strategy generation
-            "default": "mixtral:8x7b"  # Fast default model
+            "analysis": "qwen2.5:72b",          # Primary deep analysis
+            "risk": "llama3.1:70b",            # Long-form reasoning
+            "strategy": "mixtral:8x22b",       # Strategy generation
+            "default": "phi3:14b"               # Fast general fallback
         }
         
-    async def generate(self, prompt: str, model: str = "mixtral:8x7b", **kwargs) -> ModelResponse:
+    async def generate(self, prompt: str, model: str = "phi3:14b", **kwargs) -> ModelResponse:
         """Generate response using local Ollama model."""
         start_time = datetime.now()
         

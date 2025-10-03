@@ -1,0 +1,30 @@
+groups:
+  - name: service-readiness
+    interval: 30s
+    rules:
+      - alert: ServiceDegraded
+        expr: service_readiness_state == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+            summary: "Service {{ $labels.service }} degraded"
+            description: "Service {{ $labels.service }} is reporting degraded readiness for > 2m (state=1). Investigate component dependencies."
+
+      - alert: ServiceUnready
+        expr: service_readiness_state == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+            summary: "Service {{ $labels.service }} NOT READY"
+            description: "Service {{ $labels.service }} has been unready for >1m (state=0). Immediate attention required."
+
+      - alert: ServiceFlappingReadiness
+        expr: changes(service_readiness_state[10m]) > 6
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+            summary: "Service {{ $labels.service }} readiness flapping"
+            description: "Service {{ $labels.service }} readiness state changed >6 times in 10m. Indicates instability."

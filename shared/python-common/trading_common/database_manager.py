@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, List, Any, Optional, Union
 import logging
 from datetime import datetime
+import os
 
 import asyncpg
 import redis.asyncio as redis
@@ -59,13 +60,20 @@ class DatabaseManager:
                 await r.ping()
             logger.info("Redis connection established")
         except Exception as e:
+            # Downgrade to warning: allow service components that don't strictly require Redis to proceed.
             logger.error(f"Failed to connect to Redis: {e}")
-            raise
+            logger.warning("Continuing without Redis (some features will be degraded)")
+            self._redis_pool = None
     
     async def _init_questdb(self):
         """Initialize QuestDB connection pool."""
         try:
-            questdb_url = f"postgresql://{self.settings.questdb_user or 'questdb'}:{self.settings.questdb_password or 'quest'}@{self.settings.questdb_host}:{self.settings.questdb_port}/qdb"
+            # Prefer DB_ env, but accept legacy QUESTDB_HOST/QUESTDB_PORT
+            host = os.getenv('DB_QUESTDB_HOST') or getattr(self.settings, 'questdb_host', 'localhost')
+            pg_port = int(os.getenv('DB_QUESTDB_PG_PORT') or os.getenv('QUESTDB_PORT') or getattr(self.settings, 'questdb_pg_port', 8812))
+            user = getattr(self.settings, 'questdb_user', None) or os.getenv('DB_QUESTDB_USER') or 'questdb'
+            pwd = getattr(self.settings, 'questdb_password', None) or os.getenv('DB_QUESTDB_PASSWORD') or 'quest'
+            questdb_url = f"postgresql://{user}:{pwd}@{host}:{pg_port}/qdb"
             
             self._questdb_pool = await asyncpg.create_pool(
                 questdb_url,
@@ -83,13 +91,23 @@ class DatabaseManager:
     
     async def _init_postgres(self):
         """Initialize PostgreSQL connection (if configured)."""
-        if not self.settings.postgres_url:
+        # settings here is DatabaseSettings, not the root Settings model
+        postgres_url = getattr(self.settings, 'postgres_url', None)
+        if not postgres_url:
+            # Accept generic env var and coerce to asyncpg driver
+            legacy = os.getenv('DATABASE_URL')
+            if legacy:
+                if legacy.startswith('postgresql://') and '+asyncpg' not in legacy:
+                    postgres_url = legacy.replace('postgresql://', 'postgresql+asyncpg://', 1)
+                else:
+                    postgres_url = legacy
+        if not postgres_url:
             logger.info("PostgreSQL not configured, skipping")
             return
             
         try:
             self._postgres_engine = create_async_engine(
-                self.settings.postgres_url,
+                postgres_url,
                 echo=False,
                 pool_size=5,
                 max_overflow=10
@@ -101,7 +119,8 @@ class DatabaseManager:
             )
             # Test connection
             async with self._postgres_engine.begin() as conn:
-                await conn.execute("SELECT 1")
+                # Use driver-level SQL to avoid needing SQLAlchemy text()
+                await conn.exec_driver_sql("SELECT 1")
             logger.info("PostgreSQL connection established")
         except Exception as e:
             logger.error(f"Failed to connect to PostgreSQL: {e}")

@@ -1,0 +1,60 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "7.4.0" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "7.0.0" }
+  ],
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Running tasks",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "admin_tasks_running" } ]
+    },
+    {
+      "type": "stat",
+      "title": "SSE clients: logs",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "admin_logs_stream_clients" } ]
+    },
+    {
+      "type": "stat",
+      "title": "SSE clients: tasks",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "admin_task_stream_clients" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Task completions rate (by name/status)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 4 },
+      "options": { "legend": { "displayMode": "table", "placement": "right" } },
+      "targets": [ { "refId": "A", "expr": "sum by (name,status) (rate(admin_tasks_completed_total[5m]))" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests: API latency (p95)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le,endpoint) (rate(api_request_latency_seconds_bucket[5m])))" } ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 37,
+  "style": "dark",
+  "tags": ["admin", "operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "",
+  "title": "Admin Ops: Tasks & SSE",
+  "uid": "admin-ops-tasks-sse",
+  "version": 1
+}

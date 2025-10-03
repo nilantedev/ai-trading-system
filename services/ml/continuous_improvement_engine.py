@@ -16,6 +16,10 @@ from pathlib import Path
 import hashlib
 from collections import defaultdict
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.local_swarm import LocalSwarm, LocalAgent, RECOMMENDED_MODELS

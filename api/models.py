@@ -3,7 +3,11 @@
 API Models - Pydantic models for request/response validation and serialization
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
+try:  # Pydantic v2
+    from pydantic import field_validator
+except ImportError:  # pragma: no cover - fallback if still v1
+    from pydantic import validator as field_validator  # type: ignore
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
@@ -34,14 +38,16 @@ class MarketDataRequest(BaseModel):
     end_date: Optional[datetime] = Field(None, description="End date for historical data")
     limit: int = Field(100, ge=1, le=5000, description="Maximum number of records")
     
-    @validator('symbol')
-    def validate_symbol(cls, v):
+    @field_validator('symbol')
+    @classmethod
+    def _validate_symbol(cls, v: str):
         if not re.match(r'^[A-Z]{1,5}$', v.upper()):
             raise ValueError('Invalid symbol format')
         return v.upper()
-    
-    @validator('timeframe')
-    def validate_timeframe(cls, v):
+
+    @field_validator('timeframe')
+    @classmethod
+    def _validate_timeframe(cls, v: str):
         valid_timeframes = ['1min', '5min', '15min', '30min', '1hour', '1day', '1week', '1month']
         if v not in valid_timeframes:
             raise ValueError(f'Invalid timeframe. Must be one of: {valid_timeframes}')
@@ -160,13 +166,19 @@ class OrderRequest(BaseModel):
     time_in_force: TimeInForce = Field(TimeInForce.DAY, description="Time in force")
     client_order_id: Optional[str] = Field(None, description="Client-provided order ID")
     
-    @validator('symbol')
-    def validate_symbol(cls, v):
+    @field_validator('symbol')
+    @classmethod
+    def _order_symbol(cls, v: str):
         return v.upper()
-    
-    @validator('price')
-    def validate_price_for_limit_orders(cls, v, values):
-        if values.get('order_type') == OrderType.LIMIT and v is None:
+
+    @field_validator('price')
+    @classmethod
+    def _order_price(cls, v, values):  # type: ignore[override]
+        try:
+            order_type = values.get('order_type')
+        except Exception:  # pragma: no cover - defensive
+            order_type = None
+        if order_type == OrderType.LIMIT and v is None:
             raise ValueError('Price is required for limit orders')
         return v
 
@@ -242,6 +254,35 @@ class Account(BaseModel):
     pattern_day_trader: bool = Field(..., description="Pattern day trader status")
 
 
+class PortfolioPosition(BaseModel):
+    """Portfolio position tracking model."""
+    symbol: str = Field(..., description="Stock symbol")
+    quantity: int = Field(..., description="Number of shares")
+    average_price: float = Field(..., description="Average entry price")
+    current_price: float = Field(..., description="Current market price")
+    market_value: float = Field(..., description="Current market value")
+    cost_basis: float = Field(..., description="Total cost basis")
+    unrealized_pnl: float = Field(..., description="Unrealized P&L")
+    realized_pnl: float = Field(..., description="Realized P&L")
+    position_type: str = Field(..., description="LONG or SHORT")
+    opened_at: datetime = Field(..., description="Position open timestamp")
+    last_updated: datetime = Field(..., description="Last update timestamp")
+
+
+class Trade(BaseModel):
+    """Trade execution model."""
+    trade_id: str = Field(..., description="Unique trade identifier")
+    order_id: str = Field(..., description="Associated order ID")
+    symbol: str = Field(..., description="Stock symbol")
+    side: str = Field(..., description="BUY or SELL")
+    quantity: int = Field(..., description="Number of shares")
+    price: float = Field(..., description="Execution price")
+    value: float = Field(..., description="Trade value")
+    commission: float = Field(0.0, description="Trade commission")
+    executed_at: datetime = Field(..., description="Execution timestamp")
+    venue: Optional[str] = Field(None, description="Execution venue")
+
+
 class PortfolioResponse(BaseResponse):
     """Portfolio overview response."""
     account: Account = Field(..., description="Account information")
@@ -283,6 +324,12 @@ class RiskMetrics(BaseModel):
     price_change_24h: float = Field(..., description="24-hour price change")
     liquidity_score: float = Field(..., ge=0, le=1, description="Liquidity score")
     timestamp: datetime = Field(..., description="Analysis timestamp")
+    # Advanced risk metrics
+    var_95: Optional[float] = Field(None, description="95% Value at Risk")
+    cvar_95: Optional[float] = Field(None, description="95% Conditional VaR")
+    sharpe_ratio: Optional[float] = Field(None, description="Sharpe ratio")
+    sortino_ratio: Optional[float] = Field(None, description="Sortino ratio")
+    max_drawdown: Optional[float] = Field(None, description="Maximum drawdown")
 
 
 class RiskAlert(BaseModel):
@@ -400,6 +447,109 @@ class SentimentAnalysis(BaseModel):
 class SentimentResponse(BaseResponse):
     """Sentiment analysis response."""
     sentiment: SentimentAnalysis = Field(..., description="Sentiment analysis")
+
+
+# Market Regime Models
+class MarketRegime(str, Enum):
+    BULL_MARKET = "BULL_MARKET"
+    BEAR_MARKET = "BEAR_MARKET"
+    SIDEWAYS_MARKET = "SIDEWAYS_MARKET"
+    VOLATILE_MARKET = "VOLATILE_MARKET"
+    UNKNOWN = "UNKNOWN"
+
+
+class RegimeDetection(BaseModel):
+    """Market regime detection results."""
+    symbol: str = Field(..., description="Stock symbol")
+    regime: MarketRegime = Field(..., description="Current market regime")
+    confidence: float = Field(..., ge=0, le=1, description="Detection confidence")
+    regime_duration: int = Field(..., description="Duration in current regime (periods)")
+    transition_probabilities: Dict[str, float] = Field(..., description="Probability of transitioning to other regimes")
+    regime_adjustment: float = Field(..., description="Position size adjustment factor")
+    timestamp: datetime = Field(..., description="Detection timestamp")
+
+
+class MarketRegimeDetection(BaseModel):
+    """Market regime detection request/response model."""
+    symbol: str = Field(..., description="Stock symbol to analyze")
+    lookback_periods: int = Field(default=100, description="Number of periods to analyze")
+    regime: Optional[MarketRegime] = Field(None, description="Detected regime")
+    confidence: Optional[float] = Field(None, description="Detection confidence")
+    indicators: Optional[Dict[str, float]] = Field(None, description="Regime indicators")
+    timestamp: Optional[datetime] = Field(None, description="Analysis timestamp")
+
+
+# Options Models
+class OptionType(str, Enum):
+    CALL = "call"
+    PUT = "put"
+
+
+class Greeks(BaseModel):
+    """Option Greeks."""
+    delta: float = Field(..., description="Rate of change of option price with stock price")
+    gamma: float = Field(..., description="Rate of change of delta with stock price")
+    theta: float = Field(..., description="Rate of change of option price with time")
+    vega: float = Field(..., description="Rate of change of option price with volatility")
+    rho: float = Field(..., description="Rate of change of option price with interest rate")
+
+
+class OptionPricing(BaseModel):
+    """Option pricing information."""
+    symbol: str = Field(..., description="Underlying symbol")
+    strike_price: float = Field(..., description="Strike price")
+    expiration: datetime = Field(..., description="Expiration date")
+    option_type: OptionType = Field(..., description="Option type (call/put)")
+    price: float = Field(..., description="Option price (Black-Scholes)")
+    implied_volatility: float = Field(..., description="Implied volatility")
+    greeks: Greeks = Field(..., description="Option Greeks")
+    underlying_price: float = Field(..., description="Current underlying price")
+    time_to_expiry: float = Field(..., description="Time to expiry in years")
+
+
+class HedgeRecommendation(BaseModel):
+    """Options hedge recommendation."""
+    symbol: str = Field(..., description="Symbol to hedge")
+    hedge_type: str = Field(..., description="Type of hedge (protective_put, covered_call, etc.)")
+    strike_price: float = Field(..., description="Recommended strike price")
+    expiration: datetime = Field(..., description="Recommended expiration")
+
+
+class OptionsAnalysis(BaseModel):
+    """Options analysis request/response model."""
+    symbol: str = Field(..., description="Underlying symbol")
+    analysis_type: str = Field(..., description="Type of analysis: pricing, greeks, strategy")
+    option_chain: Optional[List[OptionPricing]] = Field(None, description="Option chain data")
+    recommended_strategy: Optional[str] = Field(None, description="Recommended options strategy")
+    hedge_recommendation: Optional[HedgeRecommendation] = Field(None, description="Hedge recommendation")
+    max_profit: Optional[float] = Field(None, description="Maximum profit potential")
+    max_loss: Optional[float] = Field(None, description="Maximum loss potential")
+    breakeven_points: Optional[List[float]] = Field(None, description="Breakeven price points")
+    timestamp: Optional[datetime] = Field(None, description="Analysis timestamp")
+    contracts: Optional[int] = Field(None, description="Number of contracts needed")
+    premium_cost: Optional[float] = Field(None, description="Total premium cost")
+    hedge_effectiveness: Optional[float] = Field(None, ge=0, le=1, description="Hedge effectiveness ratio")
+    greeks: Greeks = Field(..., description="Combined position Greeks")
+
+
+# Portfolio Optimization Models
+class OptimizationMethod(str, Enum):
+    MARKOWITZ = "markowitz"
+    BLACK_LITTERMAN = "black_litterman"
+    RISK_PARITY = "risk_parity"
+    HIERARCHICAL_RISK_PARITY = "hrp"
+    KELLY_CRITERION = "kelly"
+
+
+class PortfolioOptimization(BaseModel):
+    """Portfolio optimization results."""
+    method: OptimizationMethod = Field(..., description="Optimization method used")
+    weights: Dict[str, float] = Field(..., description="Optimal portfolio weights")
+    expected_return: float = Field(..., description="Expected portfolio return")
+    expected_volatility: float = Field(..., description="Expected portfolio volatility")
+    sharpe_ratio: float = Field(..., description="Expected Sharpe ratio")
+    efficient_frontier: Optional[List[Dict]] = Field(None, description="Efficient frontier points")
+    timestamp: datetime = Field(..., description="Optimization timestamp")
 
 
 # Pagination Models

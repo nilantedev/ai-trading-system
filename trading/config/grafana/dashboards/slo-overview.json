@@ -1,0 +1,119 @@
+{
+  "title": "SLO Overview",
+  "uid": "slo-overview",
+  "schemaVersion": 39,
+  "version": 2,
+  "style": "dark",
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Services Ready",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "", "values": false}},
+      "targets": [
+        {"expr": "count(service_readiness_state==2)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Services Degraded",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "", "values": false}},
+      "targets": [
+        {"expr": "count(service_readiness_state==1)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Services Unready",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "", "values": false}},
+      "targets": [
+        {"expr": "count(service_readiness_state==0)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "HTTP Error Ratio (5xx / total)",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (service)(increase(app_http_requests_total{code=~\"5..\"}[5m])) / clamp_min(sum by (service)(increase(app_http_requests_total[5m])),1)",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "linewidth": 1,
+      "legend": {"show": true}
+    },
+    {
+      "type": "graph",
+      "title": "p95 Latency (s)",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (service, le)(rate(app_http_request_latency_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "linewidth": 1,
+      "legend": {"show": true}
+    },
+    {
+      "type": "graph",
+      "title": "Pulsar Producer Errors (5m increase)",
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "increase(pulsar_producer_errors_total[5m])",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "linewidth": 1,
+      "legend": {"show": true}
+    },
+    {
+      "type": "stat",
+      "title": "Pulsar Producer Stalled?",
+      "gridPos": {"x": 0, "y": 28, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "(time() - pulsar_last_producer_success_timestamp_seconds) > 300", "refId": "A"}
+      ],
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "", "values": false}}
+    },
+    {
+      "type": "graph",
+      "title": "Circuit Breaker State (numeric)",
+      "gridPos": {"x": 4, "y": 28, "w": 8, "h": 8},
+      "targets": [
+        {"expr": "circuit_breaker_state", "refId": "A"}
+      ],
+      "lines": true,
+      "linewidth": 1,
+      "legend": {"show": true}
+    },
+    {
+      "type": "graph",
+      "title": "Adaptive Token Bucket Rate",
+      "gridPos": {"x": 0, "y": 36, "w": 6, "h": 8},
+      "targets": [
+        {"expr": "adaptive_token_bucket_rate", "refId": "A"}
+      ],
+      "lines": true,
+      "linewidth": 1
+    },
+    {
+      "type": "graph",
+      "title": "Adaptive Token Bucket Tokens",
+      "gridPos": {"x": 6, "y": 36, "w": 6, "h": 8},
+      "targets": [
+        {"expr": "adaptive_token_bucket_tokens", "refId": "A"}
+      ],
+      "lines": true,
+      "linewidth": 1
+    }
+  ]
+}

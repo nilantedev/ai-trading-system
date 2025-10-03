@@ -7,6 +7,7 @@ Addresses critical security persistence issues identified in production readines
 import json
 import hashlib
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Any, Tuple
 from dataclasses import dataclass, asdict
@@ -30,14 +31,21 @@ class SecurityEventType(str, Enum):
     """Types of security events for audit logging."""
     LOGIN_SUCCESS = "login_success"
     LOGIN_FAILURE = "login_failure"
+    LOGIN_SUCCESSFUL = "login_successful"  # Alias for LOGIN_SUCCESS
+    LOGIN_FAILED = "login_failed"  # Alias for LOGIN_FAILURE
     TOKEN_CREATED = "token_created"
     TOKEN_REVOKED = "token_revoked"
     TOKEN_REFRESH = "token_refresh"
     PERMISSION_DENIED = "permission_denied"
     SUSPICIOUS_ACTIVITY = "suspicious_activity"
     PASSWORD_CHANGE = "password_change"
+    PASSWORD_CHANGED = "password_changed"  # Alias for PASSWORD_CHANGE
     ACCOUNT_LOCKED = "account_locked"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
+    USER_CREATED = "user_created"
+    SESSION_CREATED = "session_created"
+    SESSION_INVALIDATED = "session_invalidated"
+    ROLE_CHANGED = "role_changed"
 
 
 @dataclass
@@ -127,7 +135,25 @@ class PersistentSecurityStore:
     
     def __init__(self, redis_url: Optional[str] = None):
         """Initialize security store."""
-        self.redis_url = redis_url or settings.database.redis_url or "redis://localhost:6379"
+        # Build Redis URL with password if available
+        if not redis_url:
+            # First try to use REDIS_URL from environment if set
+            redis_url_env = os.getenv('REDIS_URL')
+            if redis_url_env:
+                self.redis_url = redis_url_env
+            else:
+                # Build from components
+                redis_password = getattr(settings.database, 'redis_password', None) or os.getenv('REDIS_PASSWORD')
+                redis_host = getattr(settings.database, 'redis_host', None) or os.getenv('REDIS_HOST', 'localhost')
+                redis_port = getattr(settings.database, 'redis_port', None) or os.getenv('REDIS_PORT', 6379)
+                redis_db = getattr(settings.database, 'redis_db', 0)
+                
+                if redis_password:
+                    self.redis_url = f"redis://:{redis_password}@{redis_host}:{redis_port}/{redis_db}"
+                else:
+                    self.redis_url = f"redis://{redis_host}:{redis_port}/{redis_db}"
+        else:
+            self.redis_url = redis_url
         self.redis: Optional[aioredis.Redis] = None
         self.connected = False
         

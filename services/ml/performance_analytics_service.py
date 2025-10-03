@@ -21,6 +21,10 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import get_settings, get_logger, MarketData
 from trading_common.cache import get_trading_cache
 from trading_common.database import get_database
@@ -50,8 +54,6 @@ class AdvancedMetrics:
     sharpe_ratio: float
     sortino_ratio: float
     calmar_ratio: float
-    treynor_ratio: Optional[float] = None
-    information_ratio: Optional[float] = None
     
     # Drawdown metrics
     max_drawdown: float
@@ -76,16 +78,21 @@ class AdvancedMetrics:
     payoff_ratio: float     # Avg win / Avg loss
     kelly_criterion: float  # Optimal position size
     
+    # Advanced risk metrics
+    ulcer_index: float      # Drawdown-based risk measure
+    sterling_ratio: float   # Risk-adjusted return considering drawdowns
+    burke_ratio: float      # Modified Sharpe with drawdown in denominator
+    
+    # All optional fields must come after required fields
+    # Optional risk-adjusted metrics
+    treynor_ratio: Optional[float] = None
+    information_ratio: Optional[float] = None
+    
     # Market-relative metrics
     beta: Optional[float] = None
     alpha: Optional[float] = None
     correlation_to_market: Optional[float] = None
     tracking_error: Optional[float] = None
-    
-    # Advanced risk metrics
-    ulcer_index: float      # Drawdown-based risk measure
-    sterling_ratio: float   # Risk-adjusted return considering drawdowns
-    burke_ratio: float      # Modified Sharpe with drawdown in denominator
     
     # Time-based metrics
     up_capture: Optional[float] = None     # Upside capture ratio

@@ -1,0 +1,78 @@
+# Loop staleness alerts for ingestion background tasks
+# Uses loop_last_run_unix_seconds{loop="..."} gauge emitted by data-ingestion
+# Alert when a loop has not shown activity for too long. Thresholds are tuned per loop.
+
+groups:
+  - name: ingestion-loop-staleness
+    interval: 30s
+    rules:
+      # Generic helper recordings: compute lag seconds from last_run gauges
+      - record: loop_last_run_lag_seconds
+        expr: |
+          time() - max by (loop) (loop_last_run_unix_seconds)
+
+      # Quote stream should be active continuously off-hours too (heartbeat None frames)
+      - alert: QuoteStreamStale
+        expr: loop_last_run_lag_seconds{loop="quote_stream"} > 120
+        for: 2m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Quote stream no activity >2m"
+          description: |-
+            No quote stream activity for >2 minutes. Check provider keys, gate setting (/admin/quote-gate), and Pulsar producer.
+
+      - alert: QuoteStreamStaleCritical
+        expr: loop_last_run_lag_seconds{loop="quote_stream"} > 600
+        for: 2m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Quote stream no activity >10m"
+          description: |-
+            Quote stream idle >10 minutes. Investigate provider outages or stuck generator; consider restart.
+
+      # News/social typically slower; allow longer idle windows
+      - alert: NewsStreamStale
+        expr: loop_last_run_lag_seconds{loop="news_stream"} > 900
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "News stream no activity >15m"
+          description: News collector inactive >15m; verify NEWS_API_KEY and quotas.
+
+      - alert: SocialStreamStale
+        expr: loop_last_run_lag_seconds{loop="social_stream"} > 900
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Social stream no activity >15m"
+          description: Social collector inactive >15m; credentials may be missing or rate limited.
+
+      # Daily options runs every few hours by design
+      - alert: DailyOptionsStale
+        expr: loop_last_run_lag_seconds{loop="daily_options"} > 21600
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Daily options loop idle >6h"
+          description: Daily options refresh loop hasn't updated in over 6 hours.
+
+      # Daily delta should run hourly
+      - alert: DailyDeltaStale
+        expr: loop_last_run_lag_seconds{loop="daily_delta"} > 5400
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Daily delta loop idle >90m"
+          description: Daily delta scheduler hasn't updated in over 90 minutes.

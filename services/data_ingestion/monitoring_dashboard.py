@@ -68,7 +68,7 @@ class MonitoringDashboard:
         """Initialize system metrics."""
         system_info.info({
             'version': os.getenv('SERVICE_VERSION', '1.0.0'),
-            'environment': os.getenv('ENVIRONMENT', 'development'),
+            'environment': os.getenv('ENVIRONMENT', 'production'),
             'multi_strategy_enabled': os.getenv('FEATURE_MULTI_STRATEGY_SUPPORT', 'true'),
             'realtime_enabled': os.getenv('FEATURE_REALTIME_DATA_ENABLED', 'true')
         })

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional, List, Dict, Any, Union
 from enum import Enum
 
-from pydantic import BaseModel, Field, validator, model_validator
+from pydantic import BaseModel, Field, validator, model_validator, ConfigDict
 import json
 
 
@@ -78,8 +78,7 @@ class MarketData(BaseModel):
             raise ValueError('Low price must be <= high price')
         return v
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class OptionsData(BaseModel):
@@ -111,8 +110,7 @@ class OptionsData(BaseModel):
                 raise ValueError('Ask price must be >= bid price')
         return v
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class TechnicalIndicator(BaseModel):
@@ -135,8 +133,7 @@ class TechnicalIndicator(BaseModel):
                 return {}
         return v or {}
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class NewsEvent(BaseModel):
@@ -161,8 +158,7 @@ class NewsEvent(BaseModel):
             return [s.strip().upper() for s in v.split(',') if s.strip()]
         return [s.upper() for s in v] if v else []
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class NewsItem(BaseModel):
@@ -176,8 +172,7 @@ class NewsItem(BaseModel):
     relevance_score: float = Field(..., description="Relevance score (0 to 1)")
     symbols: List[str] = Field(default_factory=list, description="Related symbols")
     
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class SocialSentiment(BaseModel):
@@ -190,8 +185,7 @@ class SocialSentiment(BaseModel):
     engagement_score: float = Field(..., description="Engagement metrics")
     symbols: List[str] = Field(default_factory=list, description="Mentioned symbols")
     
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class TradingSignal(BaseModel):
@@ -234,8 +228,7 @@ class TradingSignal(BaseModel):
 
         return self
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class Position(BaseModel):
@@ -273,8 +266,7 @@ class PortfolioSnapshot(BaseModel):
                 raise ValueError(f'Positions value {v} does not match calculated {calculated_value}')
         return v
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class RiskEvent(BaseModel):
@@ -292,8 +284,7 @@ class RiskEvent(BaseModel):
     resolved_at: Optional[datetime] = Field(None, description="Resolution timestamp")
     resolved_by: Optional[str] = Field(None, description="Who/what resolved the event")
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
 
 class ModelPerformance(BaseModel):
@@ -307,9 +298,13 @@ class ModelPerformance(BaseModel):
     data_points: int = Field(..., gt=0, description="Number of data points used")
     symbol: Optional[str] = Field(None, description="Symbol-specific metric")
     strategy: Optional[str] = Field(None, description="Strategy name")
+    
+    # Allow model_id and model_version without triggering protected namespace warnings
+    model_config = {
+        'protected_namespaces': ()
+    }
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True, protected_namespaces=())
 
 
 # Response models for API endpoints

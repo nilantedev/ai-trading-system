@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title or 'AI Trading System' }}</title>
+        <link rel="stylesheet" href="/static/css/dashboard.css" />
+        <link rel="stylesheet" href="/static/css/award_winning.css" />
+        <style>
+            /* Inline minimal styles for auth/login page (kept scoped & low specificity) */
+            .panel { background:#111b24; padding:1rem 1.2rem; border:1px solid #1f2a33; border-radius:6px; max-width:420px; }
+            .panel input { width:100%; padding:0.55rem 0.6rem; background:#0d161d; border:1px solid #24313d; color:#e5e7eb; border-radius:4px; font-size:0.85rem; }
+            .panel input:focus { outline:1px solid #2d83f4; border-color:#2d83f4; }
+            .panel label { display:block; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.25rem; color:#8ca0b3; }
+            .panel .button { background:#2d83f4; border:none; padding:0.65rem 0.9rem; width:100%; border-radius:4px; color:#fff; font-weight:600; cursor:pointer; font-size:0.85rem; }
+            .panel .button:hover { background:#1f6ed3; }
+            .panel .note { display:block; margin-top:0.5rem; font-size:0.65rem; color:#9badbc; }
+        </style>
+        {% set host = (request.headers.get('x-forwarded-host') or request.headers.get('host') or '') | lower %}
+        <style>
+            /* Shared metric card refinements */
+            .metric-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:0.65rem; margin-top:0.75rem; }
+            .metric-card { background:#0f1921; border:1px solid #1f2c38; padding:0.55rem 0.65rem; border-radius:6px; }
+            .metric-card h3 { margin:0 0 0.15rem 0; font-size:0.6rem; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#7fa2bd; }
+            .metric-value { font-size:1.05rem; font-weight:600; line-height:1.15; }
+            .metric-sub { font-size:0.55rem; margin-top:0.15rem; color:#6b8294; }
+            body.business-site h1 { background:linear-gradient(90deg,#3aa2ff,#58d5a3); -webkit-background-clip:text; background-clip:text; color:transparent; }
+            body.admin-site h1 { background:linear-gradient(90deg,#ffb347,#ff5e62); -webkit-background-clip:text; background-clip:text; color:transparent; }
+            /* Status coloring */
+            .status-ok { color:#4ade80; }
+            .status-warn { color:#fbbf24; }
+            .status-bad { color:#f87171; }
+        </style>
+</head>
+<body data-csp-nonce="{{ csp_nonce }}" class="{% if host.startswith('admin.') %}admin-site{% elif host.startswith('biz.') %}business-site{% endif %}">
+<header>
+    <div class="brand">Mekoshi Trading Platform</div>
+    <nav>
+        {# Host-based nav separation: business host should not show Admin link #}
+        {% if host.startswith('admin.') %}
+            <a href="/admin" rel="nofollow">Admin</a>
+            <a href="/business" rel="nofollow">Business</a>
+        {% elif host.startswith('biz.') %}
+            <a href="/business" rel="nofollow">Business</a>
+        {% else %}
+            <a href="/admin" rel="nofollow">Admin</a>
+            <a href="/business" rel="nofollow">Business</a>
+        {% endif %}
+        <a href="/auth/login" rel="nofollow">Login</a>
+        <a href="#" id="nav-logout" style="display:none" rel="nofollow">Logout</a>
+    </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  <small>&copy; {{ year }} Mekoshi (mekoshi.com)</small>
+</footer>
+<script nonce="{{ csp_nonce }}">
+// Best-effort: show logout if access token cookie present
+try {
+    const hasAT = document.cookie.split(';').some(c=>c.trim().startsWith('at='));
+    if (hasAT) {
+        document.querySelector('a[href="/auth/login"]').style.display='none';
+        const lo = document.getElementById('nav-logout');
+        lo.style.display='inline-block';
+        lo.addEventListener('click', async (e)=>{
+            e.preventDefault();
+            try { await fetch('/auth/logout', {method:'POST'}); } catch(_){ }
+            window.location.href='/auth/login';
+        });
+    }
+} catch(e) {}
+</script>
+<script nonce="{{ csp_nonce }}" src="/static/js/auth_refresh.js"></script>
+</body>
+</html>

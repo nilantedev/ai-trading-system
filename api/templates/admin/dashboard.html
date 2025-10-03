@@ -1,0 +1,331 @@
+{% extends 'base.html' %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', path='/css/realtime_dashboard.css') }}">
+{% endblock %}
+{% block content %}
+<h1>🔧 Admin God-Mode Control Panel <span class="health-indicator healthy" data-health-component="system"></span></h1>
+<section id="system-summary" class="panel">
+  <h2>Core System Summary</h2>
+  <div id="system-summary-body">Loading...</div>
+</section>
+<section id="ops-snapshot" class="panel">
+  <h2>Operational Snapshot</h2>
+  <div class="grid four" id="ops-snapshot-grid">
+    <div class="card"><h3>Forecast Fallback Ratio (5m)</h3><div id="op-forecast-fallback" class="metric">—</div></div>
+    <div class="card"><h3>Drift Severity</h3><div id="op-drift-severity" class="metric">—</div></div>
+    <div class="card"><h3>Data Lag (Equities)</h3><div id="op-lag-equities" class="metric">—</div></div>
+    <div class="card"><h3>Data Lag (Options)</h3><div id="op-lag-options" class="metric">—</div></div>
+    <div class="card"><h3>Data Lag (News)</h3><div id="op-lag-news" class="metric">—</div></div>
+    <div class="card"><h3>Data Lag (Social)</h3><div id="op-lag-social" class="metric">—</div></div>
+    <div class="card"><h3>Backfill Complete</h3><div id="op-backfill-complete" class="metric">—</div></div>
+    <div class="card"><h3>Open Circuit Breakers</h3><div id="op-open-breakers" class="metric">—</div></div>
+  </div>
+  <div class="panel-sub note" style="margin-top:0.5rem;">Snapshot merges metrics & recent health data for single-paint dashboard stabilization.</div>
+</section>
+<section class="panel">
+  <h2>⚙️ Service Control Center (Live)</h2>
+  <div id="services-grid" style="margin-top: 16px;">
+    <p style="text-align:center; padding:20px; color:#9e9e9e;">Loading services...</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>🧠 Intelligence Configuration (Model Weights & Factor Tuning)</h2>
+  <div id="intelligence-config" style="margin-top: 16px;">
+    <p style="text-align:center; padding:20px; color:#9e9e9e;">Loading configuration...</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>⚡ System Metrics (Real-Time)</h2>
+  <div class="metric-grid" style="grid-template-columns: repeat(4, 1fr); margin-top: 16px;">
+    <div class="metric-card">
+      <h3>System CPU</h3>
+      <div class="metric-value" id="system-cpu">—</div>
+      <div class="metric-sub">Average Utilization</div>
+    </div>
+    <div class="metric-card">
+      <h3>System Memory</h3>
+      <div class="metric-value" id="system-memory">—</div>
+      <div class="metric-sub">GB Used</div>
+    </div>
+    <div class="metric-card">
+      <h3>Disk Usage</h3>
+      <div class="metric-value" id="system-disk">—</div>
+      <div class="metric-sub">% Used</div>
+    </div>
+    <div class="metric-card">
+      <h3>Network I/O</h3>
+      <div class="metric-value" id="system-network">—</div>
+      <div class="metric-sub">Mbps</div>
+    </div>
+    <div class="metric-card">
+      <h3>Requests/sec</h3>
+      <div class="metric-value" id="requests-per-sec">—</div>
+      <div class="metric-sub">All Services</div>
+    </div>
+    <div class="metric-card">
+      <h3>Data Ingested</h3>
+      <div class="metric-value" id="data-ingested">—</div>
+      <div class="metric-sub">GB per Hour</div>
+    </div>
+    <div class="metric-card">
+      <h3>Signals Generated</h3>
+      <div class="metric-value" id="signals-generated">—</div>
+      <div class="metric-sub">Per Minute</div>
+    </div>
+    <div class="metric-card">
+      <h3>Model Inferences</h3>
+      <div class="metric-value" id="model-inferences">—</div>
+      <div class="metric-sub">Per Second</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>🚨 Emergency Controls</h2>
+  <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px;">
+    <button id="kill-switch" class="button" style="background: #f44336; color: #fff; font-weight: 700;">KILL SWITCH</button>
+    <button id="reset-circuit-breakers" class="button secondary">Reset Circuit Breakers</button>
+    <button id="force-model-reload" class="button secondary">Force Model Reload</button>
+    <button id="adjust-risk-limits" class="button secondary">Adjust Risk Limits</button>
+    <button id="force-gc" class="button secondary">Force Garbage Collection</button>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>📊 Manual Backfill Triggers</h2>
+  <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px;">
+    <button id="trigger-equity-backfill" class="button primary">Trigger Equity Backfill</button>
+    <button id="trigger-news-backfill" class="button primary">Trigger News Backfill</button>
+    <button id="trigger-options-backfill" class="button primary">Trigger Options Backfill</button>
+    <button id="trigger-social-backfill" class="button primary">Trigger Social Backfill</button>
+  </div>
+  <div style="margin-top: 16px;">
+    <button id="promote-all-shadows" class="button" style="background: #4caf50; color: #fff;">Promote All Shadow Models</button>
+  </div>
+</section>
+
+<section class="panel" style="margin-top:1rem;max-width:560px">
+  <h2 style="margin:0 0 .5rem 0">Security Tools</h2>
+  <form id="regen-bcodes" onsubmit="return false;">
+    <button class="button" id="regen-btn">Regenerate MFA Backup Codes</button>
+  </form>
+  <pre id="codes" style="white-space:pre-wrap;margin-top:.6rem;font-size:.85rem;display:none"></pre>
+  <div style="margin-top:.6rem">
+    <button class="button secondary" id="mfa-qr-btn">Show MFA QR (local)</button>
+    <div id="mfa-qr" style="margin-top:.5rem;display:none">
+      <img id="mfa-qr-img" alt="MFA QR" style="max-width:220px;display:block" />
+      <div id="mfa-otpauth" class="note" style="word-break:break-all"></div>
+    </div>
+  </div>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    const btn = document.getElementById('regen-btn');
+    const pre = document.getElementById('codes');
+    btn.addEventListener('click', async () => {
+      try {
+        const csrf = (document.cookie.split(';').find(x=>x.trim().startsWith('csrf_token='))||'').split('=')[1]||'';
+        const r = await fetch('/auth/mfa/backup/regenerate', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body: JSON.stringify({code: prompt('Enter current MFA code to regenerate backup codes:')||''})});
+        if(!r.ok){ alert('Failed: '+r.status); return; }
+        const j = await r.json();
+        pre.style.display='block';
+        pre.textContent = (j.backup_codes||[]).join('\n');
+      } catch(e){ alert('Error: '+e); }
+    });
+    const qbtn = document.getElementById('mfa-qr-btn');
+    qbtn.addEventListener('click', async ()=>{
+      try{
+        // Local ops endpoint; only works from localhost/private addresses
+        const uname = 'nilante';
+        const r = await fetch('/auth/admin/ops/mfa_setup_local', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username: uname})});
+        const j = await r.json();
+        if(!r.ok){ alert('QR fetch failed: '+(j.detail||r.status)); return; }
+        const wrap = document.getElementById('mfa-qr');
+        const img = document.getElementById('mfa-qr-img');
+        const txt = document.getElementById('mfa-otpauth');
+        if(j.qr_png_base64){ img.src = 'data:image/png;base64,'+j.qr_png_base64; img.style.display='block'; }
+        txt.textContent = j.otpauth_url || '';
+        wrap.style.display='block';
+      }catch(e){ alert('Error: '+e); }
+    });
+  })();
+  </script>
+</section>
+<section id="trading-performance" class="panel">
+  <h2>Aggregate Trading Performance</h2>
+  <div id="trading-performance-body">Loading...</div>
+</section>
+<section id="model-status" class="panel">
+  <h2>Model Lifecycle & Status</h2>
+  <div id="model-status-body">Loading...</div>
+  <div class="controls">
+    <button id="btn-promotion-check" class="button">Run Promotion Check</button>
+    <form id="rollback-form" class="inline">
+      <input type="text" id="rollback-model-id" placeholder="model_id" aria-label="Model ID" />
+      <button type="submit" class="button danger">Rollback Model</button>
+    </form>
+    <div id="admin-action-result" class="note"></div>
+  </div>
+</section>
+<section id="metrics" class="panel">
+  <h2>Runtime Metrics & Resource Health</h2>
+  <div id="metrics-body">Loading...</div>
+</section>
+<section id="data-verification" class="panel">
+  <h2>Data Verification & Coverage</h2>
+  <div class="panel-sub note">Automated verification of historical completeness & recent gaps across datasets.</div>
+  <div class="controls">
+    <button id="btn-verification-refresh" class="button secondary">Refresh Verification</button>
+    <button id="btn-force-backfill" class="button">Force Backfill</button>
+    <button id="btn-bootstrap-tables" class="button secondary">Create Missing Tables</button>
+    <span id="verification-status" class="badge">pending</span>
+    <span id="coverage-backfill-badge" class="badge" title="coverage_backfill_complete gauge">—</span>
+  </div>
+  <div id="verification-summary">Loading...</div>
+  <pre id="verification-raw" class="log" style="display:none"></pre>
+</section>
+<section id="on-demand-backfill" class="panel">
+  <h2>On-demand Backfill</h2>
+  <div class="controls">
+    <button id="btn-backfill-equities" class="button">Equities 20y (0.2s)</button>
+    <button id="btn-backfill-options" class="button">Options 5y rolling</button>
+    <button id="btn-backfill-news" class="button secondary">News backfill</button>
+    <button id="btn-backfill-calendar" class="button secondary">Calendar backfill</button>
+    <span id="backfill-trigger-status" class="note"></span>
+  </div>
+</section>
+<section id="drift-summary" class="panel">
+  <h2>Drift Severity Summary</h2>
+  <div id="drift-summary-body">Loading...</div>
+</section>
+<section id="backfill-jobs" class="panel">
+  <h2>Recent Backfill Jobs</h2>
+  <div id="backfill-jobs-body">Loading...</div>
+</section>
+<section id="latency" class="panel">
+  <h2>Latency & Circuit Breakers</h2>
+  <div id="latency-body">Loading...</div>
+</section>
+<section id="heartbeat" class="panel">
+  <h2>Heartbeat & Live Streaming</h2>
+  <div class="grid three">
+    <div class="card"><h3>Connection</h3><div id="heartbeat-connection" class="badge">disconnected</div></div>
+    <div class="card"><h3>Last Beat</h3><div id="heartbeat-last">—</div></div>
+    <div class="card"><h3>Latency (ms)</h3><div id="heartbeat-latency">—</div></div>
+  </div>
+  <div class="panel-sub" id="heartbeat-meta"></div>
+</section>
+<section id="ingestion-freshness" class="panel">
+  <h2>Ingestion Freshness</h2>
+  <div id="freshness-body">Loading...</div>
+  <canvas id="freshnessChart" class="chart" height="160" aria-label="Ingestion freshness" role="img" style="margin-top:10px;width:100%;"></canvas>
+</section>
+<section id="pnl-timeseries" class="panel">
+  <h2>Intraday PnL Timeseries</h2>
+  <div id="pnl-timeseries-body">Loading...</div>
+  <canvas id="pnlChart" class="chart" height="200" aria-label="PnL chart" role="img" style="margin-top:10px;width:100%;"></canvas>
+</section>
+<section id="data-quality" class="panel">
+  <h2>Data Quality Signals</h2>
+  <div id="data-quality-body">Waiting for verification run...</div>
+</section>
+<section id="task-runner" class="panel">
+  <h2>Task Runner</h2>
+  <p class="note">Run whitelisted operational tasks from the API container. Examples: backfill (symbols, date range), health-check, quality-check, diagnose (service), sbom.</p>
+  <form id="task-form" class="inline">
+    <label for="task-name">Task</label>
+    <select id="task-name">
+      <option value="backfill">backfill</option>
+      <option value="health-check">health-check</option>
+      <option value="quality-check">quality-check</option>
+      <option value="diagnose">diagnose</option>
+      <option value="sbom">sbom</option>
+  <option value="bulk-load">bulk-load</option>
+    </select>
+    <input type="text" id="task-args" placeholder="optional args (comma-separated)" aria-label="Task Args" />
+    <button type="submit" class="button">Run Task</button>
+  </form>
+  <div id="task-status" class="note"></div>
+  <pre id="task-stream" class="log"></pre>
+  <button id="task-stream-stop" class="button secondary">Stop Stream</button>
+  <button id="task-stream-clear" class="button secondary">Clear</button>
+  <div id="task-end-status" class="note"></div>
+  <hr />
+  <h3>Application Logs (Live)</h3>
+  <div id="logs-conn" class="badge">connecting…</div>
+  <pre id="logs-stream" class="log"></pre>
+  <button id="logs-stream-stop" class="button secondary">Stop Logs</button>
+  <button id="logs-stream-clear" class="button secondary">Clear</button>
+</section>
+<script nonce="{{ csp_nonce }}" src="/static/js/admin_dashboard.js"></script>
+<script nonce="{{ csp_nonce }}" src="/static/js/admin_god_mode.js"></script>
+<script nonce="{{ csp_nonce }}">
+async function fetchJSON(u){ const r=await fetch(u,{credentials:'include'}); if(!r.ok) throw new Error(r.status); return r.json(); }
+async function loadOpsSnapshot(){
+  try {
+    const s=await fetchJSON('/admin/api/ops/snapshot');
+    const map={
+      'op-forecast-fallback': (s.forecast_fallback_ratio_5m!=null? (s.forecast_fallback_ratio_5m*100).toFixed(2)+'%':'—'),
+      'op-drift-severity': s.drift_severity? s.drift_severity.label:'—',
+      'op-lag-equities': s.data_lag_classes? s.data_lag_classes.equities:'—',
+      'op-lag-options': s.data_lag_classes? s.data_lag_classes.options:'—',
+      'op-lag-news': s.data_lag_classes? s.data_lag_classes.news:'—',
+      'op-lag-social': s.data_lag_classes? s.data_lag_classes.social:'—',
+      'op-backfill-complete': s.backfill_complete===true? 'complete':'in-progress',
+      'op-open-breakers': s.open_circuit_breakers!=null? s.open_circuit_breakers:'—'
+    };
+    Object.entries(map).forEach(([id,val])=>{ const el=document.getElementById(id); if(el){ el.textContent=val; }});
+    // severity coloring
+    const sevEl=document.getElementById('op-drift-severity'); if(sevEl){ const label=sevEl.textContent||''; sevEl.classList.remove('status-ok','status-warn','status-bad'); if(label==='high') sevEl.classList.add('status-bad'); else if(label==='medium') sevEl.classList.add('status-warn'); else if(label==='low') sevEl.classList.add('status-ok'); }
+  } catch(e) { /* silent */ }
+}
+loadOpsSnapshot(); setInterval(loadOpsSnapshot, 20000);
+// On-demand backfill triggers
+(function(){
+  async function call(path, body){
+    const s = document.getElementById('backfill-trigger-status');
+    s.textContent = 'starting…';
+    try{
+      const csrf = (document.cookie.split(';').find(x=>x.trim().startsWith('csrf_token='))||'').split('=')[1]||'';
+      const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body: JSON.stringify(body||{})});
+      s.textContent = r.ok? 'scheduled' : ('error '+r.status);
+    }
+    catch(e){ s.textContent = 'error '+e; }
+  }
+  const eq=document.getElementById('btn-backfill-equities'); if(eq) eq.onclick=()=>call('/admin/api/backfill/equities', {years:20, max_symbols:1000, pacing_seconds:0.2});
+  const op=document.getElementById('btn-backfill-options'); if(op) op.onclick=()=>call('/admin/api/backfill/options', {max_underlyings:200, pacing_seconds:0.2, expiry_back_days:365*2, expiry_ahead_days:90, hist_lookback_days:365*5});
+  const nw=document.getElementById('btn-backfill-news'); if(nw) nw.onclick=()=>call('/admin/api/backfill/news', {days:365*3, batch_days:14, max_articles_per_batch:80});
+  const cal=document.getElementById('btn-backfill-calendar'); if(cal) cal.onclick=()=>call('/admin/api/backfill/calendar', {years:5, include_dividends:true, pacing_seconds:0.1});
+})();
+</script>
+<script nonce="{{ csp_nonce }}">
+// Lightweight health and model slots panels (read-only)
+(function(){
+  async function renderSvc(){
+    const el=document.getElementById('svc-health'); if(!el) return;
+    try{
+      const [h1,h2] = await Promise.allSettled([
+        fetch('/health'),
+        fetch('/health/full', {credentials:'include'})
+      ]);
+      function _badge(ok, code){ return `<span class="badge ${ok?'success':'warning'}">${code||'err'}</span>`; }
+      const c1 = h1.status==='fulfilled'? h1.value.status : 0;
+      const c2 = h2.status==='fulfilled'? h2.value.status : 0;
+      el.innerHTML = `<div>API /health: ${_badge(c1===200, c1)}</div><div>API /health/full: ${_badge(c2===200, c2)}</div>`;
+    }catch(e){ el.textContent='N/A'; }
+  }
+  async function renderModels(){
+    const el=document.getElementById('model-heat'); if(!el) return;
+    try{
+      const r = await fetch('http://localhost:11434/api/tags');
+      if(!r.ok) throw new Error('tags:'+r.status);
+      const j = await r.json();
+      const models = (j.models||[]).map(m=>m.model||m.name||'?');
+      el.innerHTML = (models.length? models: ['no models']).map((m,i)=>`<div class="heat"><div class="sym">${m}</div><div class="sub">slot ${i+1}</div></div>`).join('');
+    }catch(_){ el.textContent='N/A'; }
+  }
+  renderSvc(); renderModels(); setInterval(renderSvc, 30000);
+})();
+</script>
+{% endblock %}

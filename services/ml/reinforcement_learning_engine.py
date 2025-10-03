@@ -15,6 +15,16 @@ from collections import deque
 import random
 import pickle
 import os
+import copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.distributions import Categorical, Normal
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
 
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
@@ -214,11 +224,267 @@ class DQNAgent:
             logger.warning(f"Failed to load RL model: {e}")
 
 
-class ReinforcementLearningEngine:
-    """Main RL engine for trading system."""
+class PPOAgent:
+    """Proximal Policy Optimization for continuous trading actions."""
     
-    def __init__(self):
-        self.agent = DQNAgent()
+    def __init__(self, state_dim: int = 12, action_dim: int = 3, lr: float = 3e-4):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Actor-Critic networks
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, action_dim * 2)  # Mean and std for continuous actions
+        ).to(self.device)
+        
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        ).to(self.device)
+        
+        self.optimizer = optim.Adam(
+            list(self.actor.parameters()) + list(self.critic.parameters()),
+            lr=lr
+        )
+        
+        self.clip_epsilon = 0.2
+        self.gamma = 0.99
+        self.gae_lambda = 0.95
+        
+    def get_action(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
+        """Get action with exploration noise."""
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            output = self.actor(state_tensor)
+            mean, log_std = output.chunk(2, dim=-1)
+            std = log_std.exp()
+            
+            dist = Normal(mean, std)
+            action = dist.sample()
+            log_prob = dist.log_prob(action).sum(-1)
+            
+        return action.cpu().numpy().squeeze(), log_prob.cpu().item()
+        
+    def compute_gae(self, rewards: List[float], values: List[float], next_value: float, dones: List[bool]) -> torch.Tensor:
+        """Compute Generalized Advantage Estimation."""
+        advantages = []
+        gae = 0
+        
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value_t = next_value
+            else:
+                next_value_t = values[t + 1]
+                
+            delta = rewards[t] + self.gamma * next_value_t * (1 - dones[t]) - values[t]
+            gae = delta + self.gamma * self.gae_lambda * (1 - dones[t]) * gae
+            advantages.insert(0, gae)
+            
+        return torch.tensor(advantages, dtype=torch.float32).to(self.device)
+    
+    def update(self, states, actions, log_probs_old, returns, advantages):
+        """Update policy using PPO objective."""
+        states = torch.FloatTensor(states).to(self.device)
+        actions = torch.FloatTensor(actions).to(self.device)
+        log_probs_old = torch.FloatTensor(log_probs_old).to(self.device)
+        returns = torch.FloatTensor(returns).to(self.device)
+        advantages = torch.FloatTensor(advantages).to(self.device)
+        
+        for _ in range(10):  # PPO epochs
+            # Get current policy
+            output = self.actor(states)
+            mean, log_std = output.chunk(2, dim=-1)
+            std = log_std.exp()
+            dist = Normal(mean, std)
+            
+            log_probs = dist.log_prob(actions).sum(-1)
+            
+            # Compute ratio
+            ratio = (log_probs - log_probs_old).exp()
+            
+            # Clipped objective
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+            
+            # Value loss
+            values = self.critic(states).squeeze()
+            critic_loss = F.mse_loss(values, returns)
+            
+            # Total loss
+            loss = actor_loss + 0.5 * critic_loss
+            
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+
+class A3CAgent:
+    """Asynchronous Advantage Actor-Critic for parallel trading environments."""
+    
+    def __init__(self, state_dim: int = 12, action_dim: int = 15, n_workers: int = 4):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.n_workers = n_workers
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Shared networks with LSTM for temporal dependencies
+        self.shared_actor = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, action_dim)
+        ).to(self.device)
+        
+        self.shared_critic = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        ).to(self.device)
+        
+        # Shared optimizer
+        self.optimizer = optim.Adam(
+            list(self.shared_actor.parameters()) + list(self.shared_critic.parameters()),
+            lr=1e-4
+        )
+        
+        self.lock = asyncio.Lock()
+        self.gamma = 0.99
+        
+    async def train_worker(self, worker_id: int, env_func):
+        """Train single worker asynchronously."""
+        # Create local copies
+        local_actor = copy.deepcopy(self.shared_actor)
+        local_critic = copy.deepcopy(self.shared_critic)
+        
+        env = env_func()  # Create environment for this worker
+        
+        while True:
+            # Collect trajectory
+            trajectory = await self.collect_trajectory(env, local_actor, local_critic)
+            
+            if trajectory:
+                # Compute gradients
+                actor_loss, critic_loss = self.compute_loss(trajectory, local_actor, local_critic)
+                
+                # Apply gradients to shared model
+                async with self.lock:
+                    self.apply_gradients(local_actor, self.shared_actor)
+                    self.apply_gradients(local_critic, self.shared_critic)
+                    
+                # Sync local model with shared
+                local_actor.load_state_dict(self.shared_actor.state_dict())
+                local_critic.load_state_dict(self.shared_critic.state_dict())
+                
+            await asyncio.sleep(0.1)  # Small delay between episodes
+    
+    async def collect_trajectory(self, env, actor, critic, max_steps: int = 100):
+        """Collect a trajectory of experiences."""
+        states, actions, rewards, values, log_probs = [], [], [], [], []
+        
+        state = env.reset()
+        
+        for _ in range(max_steps):
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            
+            # Get action from actor
+            with torch.no_grad():
+                action_logits = actor(state_tensor)
+                action_dist = Categorical(F.softmax(action_logits, dim=-1))
+                action = action_dist.sample()
+                log_prob = action_dist.log_prob(action)
+                
+                # Get value from critic
+                value = critic(state_tensor)
+            
+            # Take action in environment
+            next_state, reward, done, _ = env.step(action.item())
+            
+            states.append(state)
+            actions.append(action.item())
+            rewards.append(reward)
+            values.append(value.item())
+            log_probs.append(log_prob.item())
+            
+            state = next_state
+            
+            if done:
+                break
+                
+        return {
+            'states': states,
+            'actions': actions,
+            'rewards': rewards,
+            'values': values,
+            'log_probs': log_probs
+        }
+    
+    def compute_loss(self, trajectory, actor, critic):
+        """Compute actor and critic losses."""
+        states = torch.FloatTensor(trajectory['states']).to(self.device)
+        actions = torch.LongTensor(trajectory['actions']).to(self.device)
+        rewards = trajectory['rewards']
+        values = trajectory['values']
+        
+        # Compute returns
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+        returns = torch.FloatTensor(returns).to(self.device)
+        
+        # Compute advantages
+        advantages = returns - torch.FloatTensor(values).to(self.device)
+        
+        # Actor loss
+        action_logits = actor(states)
+        action_dist = Categorical(F.softmax(action_logits, dim=-1))
+        log_probs = action_dist.log_prob(actions)
+        actor_loss = -(log_probs * advantages.detach()).mean()
+        
+        # Critic loss
+        value_preds = critic(states).squeeze()
+        critic_loss = F.mse_loss(value_preds, returns)
+        
+        return actor_loss, critic_loss
+    
+    def apply_gradients(self, local_model, shared_model):
+        """Apply gradients from local to shared model."""
+        for local_param, shared_param in zip(local_model.parameters(), shared_model.parameters()):
+            if shared_param.grad is None:
+                shared_param.grad = local_param.grad.clone()
+            else:
+                shared_param.grad += local_param.grad.clone()
+
+
+class ReinforcementLearningEngine:
+    """Main RL engine for trading system with multiple algorithms."""
+    
+    def __init__(self, algorithm: str = 'dqn'):
+        self.algorithm = algorithm
+        
+        # Initialize appropriate agent
+        if algorithm == 'dqn':
+            self.agent = DQNAgent()
+        elif algorithm == 'ppo':
+            self.agent = PPOAgent()
+        elif algorithm == 'a3c':
+            self.agent = A3CAgent()
+        else:
+            self.agent = DQNAgent()  # Default to DQN
+            
         self.cache = None
         
         # State tracking

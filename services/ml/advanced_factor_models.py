@@ -16,13 +16,17 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Statistical and ML imports
-from sklearn.linear_model import LinearRegression, RidgeRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 from scipy import stats
 from scipy.optimize import minimize
 import statsmodels.api as sm
 from statsmodels.regression.rolling import RollingOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
 
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache

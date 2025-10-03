@@ -1,0 +1,40 @@
+# Prometheus alert rules for Execution Service OMS readiness & initialization
+# Production-focused: early detection of stuck or slow OMS initialization
+# Ensure this directory is mounted read-only into Prometheus container.
+
+ groups:
+  - name: execution-oms-readiness
+    interval: 30s
+    rules:
+      - alert: ExecutionOMSInitStuck
+        expr: service_readiness_state{service="execution"} == 2 and increase(oms_init_attempts_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: execution
+          component: oms
+        annotations:
+          summary: "Execution OMS initialization stuck"
+          description: "OMS not initialized after repeated attempts ({{ $value }} attempts in last 5m). Check Pulsar and execution logs."
+
+      - alert: ExecutionOMSDegradedLong
+        expr: service_readiness_state{service="execution"} == 2 and on(service) (time() - max_over_time(service_readiness_state{service="execution"}[15m]) > 900)
+        for: 0m
+        labels:
+          severity: critical
+          service: execution
+          component: oms
+        annotations:
+          summary: "Execution service degraded for >15m"
+          description: "Execution readiness degraded for more than 15 minutes. Investigate Pulsar, Redis, or OMS startup failures."
+
+      - alert: ExecutionOMSRepeatedFlaps
+        expr: increase(oms_init_attempts_total[30m]) > 20
+        for: 0m
+        labels:
+          severity: warning
+          service: execution
+          component: oms
+        annotations:
+          summary: "Execution OMS repeated initialization attempts"
+          description: "High number of OMS (re)initialization attempts in 30m window (>{{ $value }}). Potential Pulsar instability or crash loop."

@@ -3,29 +3,37 @@ global:
   evaluation_interval: 15s
 
 rule_files:
-  - "rules/*.yml"
+  - "/etc/prometheus/rules/*.yml"
 
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
-
   - job_name: 'node-exporter'
     static_configs:
       - targets: ['node-exporter:9100']
-
   - job_name: 'cadvisor'
     static_configs:
       - targets: ['cadvisor:8080']
-
-  - job_name: 'redis'
+  - job_name: 'api'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['redis:6379']
-
-  - job_name: 'questdb'
+      - targets: ['api:8000']
+  - job_name: 'ml'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['questdb:9000']
-
-  - job_name: 'traefik'
+      - targets: ['ml:8001']
+  - job_name: 'data-ingestion'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['traefik:8080']
+      - targets: ['data-ingestion:8002']
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['loki:3100']
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+  - job_name: 'weaviate'
+    metrics_path: /v1/.well-known/metrics
+    static_configs:
+      - targets: ['weaviate:8080']

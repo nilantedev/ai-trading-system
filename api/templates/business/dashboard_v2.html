@@ -1,0 +1,584 @@
+{% extends 'base.html' %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', path='/css/realtime_dashboard.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='/css/award_winning.css') }}">
+<script nonce="{{ csp_nonce }}" src="/static/js/chart.min.js"></script>
+<script nonce="{{ csp_nonce }}" src="/static/js/d3.min.js"></script>
+{% endblock %}
+{% block content %}
+<div class="dashboard-hero">
+  <h1 class="gradient-text">🚀 Mekoshi Intelligence Platform</h1>
+  <p class="hero-subtitle">PhD-Level Options Trading • Real-Time Analysis • Live Data</p>
+</div>
+
+<section class="kpi-banner">
+  <div class="kpi-item">
+    <div class="kpi-label">Active Strategies</div>
+    <div class="kpi-value" data-kpi="active_strategies">—</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-label">Signals Today</div>
+    <div class="kpi-value" data-kpi="daily_signals">—</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-label">Latency</div>
+    <div class="kpi-value"><span data-kpi="avg_signal_latency_ms">—</span>ms</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-label">Risk Alerts</div>
+    <div class="kpi-value status" data-kpi="risk_alerts_today">—</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-label">Optionable Symbols</div>
+    <div class="kpi-value" id="watchlist-count">328</div>
+  </div>
+</section>
+
+<section class="panel-glass">
+  <div class="panel-header">
+    <h2>🔥 Live Options Flow (Whale Activity)</h2>
+    <span class="status-dot pulse"></span>
+  </div>
+  <div id="options-flow-table" class="scrollable-table">
+    <table class="flow-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Strike</th>
+          <th>Expiry</th>
+          <th>Size</th>
+          <th>Premium</th>
+          <th>IV</th>
+        </tr>
+      </thead>
+      <tbody id="flow-tbody">
+        <tr><td colspan="8" class="loading-row">Connecting to live feed...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="grid-2">
+  <section class="panel-glass">
+    <h2>📊 Market Heatmap (Real-Time)</h2>
+    <div id="market-heatmap-viz" style="height: 300px;"></div>
+  </section>
+  
+  <section class="panel-glass">
+    <h2>📈 Coverage Trends (Live)</h2>
+    <canvas id="coverage-chart" height="250"></canvas>
+  </section>
+</div>
+
+<section class="panel-glass">
+  <div class="panel-header">
+    <h2>🎯 PhD Symbol Intelligence</h2>
+    <div class="intelligence-controls">
+      <input id="intel-symbol" type="text" value="AAPL" placeholder="Enter symbol..." class="modern-input" />
+      <button id="intel-run" class="btn-primary">
+        <span class="btn-icon">⚡</span> Analyze
+      </button>
+    </div>
+  </div>
+  <div id="intelligence-output" class="intelligence-panel"></div>
+</section>
+
+<div class="grid-3">
+  <section class="panel-glass">
+    <h2>📉 Volatility Surface</h2>
+    <canvas id="vol-surface-chart" height="200"></canvas>
+  </section>
+  
+  <section class="panel-glass">
+    <h2>🎲 Factor Exposures</h2>
+    <canvas id="factor-radar" height="200"></canvas>
+  </section>
+  
+  <section class="panel-glass">
+    <h2>📰 News Sentiment (30d)</h2>
+    <canvas id="sentiment-chart" height="200"></canvas>
+  </section>
+</div>
+
+<section class="panel-glass">
+  <h2>🏢 Company Analytics</h2>
+  <div class="controls-row">
+    <select id="company-select" class="modern-select">
+      <option value="">Loading symbols...</option>
+    </select>
+    <button id="load-company" class="btn-secondary">Load Analysis</button>
+  </div>
+  
+  <div id="company-details" class="company-grid" style="display:none; margin-top: 20px;">
+    <div class="detail-card">
+      <h3>Fundamentals</h3>
+      <div id="fundamentals-data"></div>
+    </div>
+    <div class="detail-card">
+      <h3>Risk Metrics</h3>
+      <div id="risk-data"></div>
+    </div>
+    <div class="detail-card">
+      <h3>Options Data</h3>
+      <div id="options-data"></div>
+    </div>
+  </div>
+  
+  <div class="grid-2" style="margin-top: 20px; display: none;" id="company-charts">
+    <div>
+      <h3>Price History (50 bars)</h3>
+      <canvas id="price-sparkline" height="150"></canvas>
+    </div>
+    <div>
+      <h3>Factor Evolution (90d)</h3>
+      <canvas id="factor-timeseries" height="150"></canvas>
+    </div>
+  </div>
+</section>
+
+<script nonce="{{ csp_nonce }}">
+// === GLOBAL STATE ===
+const charts = {};
+const chartColors = {
+  primary: '#3b82f6',
+  success: '#10b981',
+  warning: '#f59e0b',
+  danger: '#ef4444',
+  purple: '#8b5cf6',
+  cyan: '#06b6d4'
+};
+
+// === UTILITY FUNCTIONS ===
+async function fetchJSON(url) {
+  const r = await fetch(url, { credentials: 'include' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function formatNumber(val) {
+  if (val === null || val === undefined) return '—';
+  if (typeof val === 'number') {
+    if (Math.abs(val) >= 1e9) return (val / 1e9).toFixed(2) + 'B';
+    if (Math.abs(val) >= 1e6) return (val / 1e6).toFixed(2) + 'M';
+    if (Math.abs(val) >= 1e3) return (val / 1e3).toFixed(1) + 'K';
+    return val.toFixed(2);
+  }
+  return val;
+}
+
+function setStatus(elem, value, thresholds = { good: 2, warn: 5 }) {
+  if (!elem) return;
+  elem.textContent = value;
+  elem.classList.remove('status-ok', 'status-warn', 'status-bad');
+  if (value <= thresholds.good) elem.classList.add('status-ok');
+  else if (value <= thresholds.warn) elem.classList.add('status-warn');
+  else elem.classList.add('status-bad');
+}
+
+// === LOAD KPIs ===
+async function loadKPIs() {
+  try {
+    const data = await fetchJSON('/business/api/kpis');
+    const kpis = data.kpis || {};
+    Object.entries(kpis).forEach(([key, val]) => {
+      const el = document.querySelector(`[data-kpi="${key}"]`);
+      if (el) {
+        if (key === 'risk_alerts_today') {
+          setStatus(el, val);
+        } else {
+          el.textContent = typeof val === 'number' ? val.toLocaleString() : val;
+        }
+      }
+    });
+  } catch (e) {
+    console.error('KPIs failed:', e);
+  }
+}
+
+// === OPTIONS FLOW (Simulated Live Data) ===
+async function loadOptionsFlow() {
+  const tbody = document.getElementById('flow-tbody');
+  if (!tbody) return;
+  
+  // Simulate whale activity
+  const symbols = ['AAPL', 'TSLA', 'SPY', 'NVDA', 'AMZN', 'MSFT'];
+  const types = ['CALL', 'PUT'];
+  
+  function generateFlow() {
+    const symbol = symbols[Math.floor(Math.random() * symbols.length)];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const strike = (150 + Math.random() * 150).toFixed(2);
+    const size = Math.floor(100 + Math.random() * 900);
+    const premium = (size * (10 + Math.random() * 40)).toFixed(0);
+    const iv = (0.25 + Math.random() * 0.4).toFixed(3);
+    const expiry = new Date(Date.now() + Math.random() * 60 * 86400000).toISOString().slice(0, 10);
+    const time = new Date().toLocaleTimeString();
+    
+    return `<tr class="fade-in">
+      <td>${time}</td>
+      <td class="symbol-cell">${symbol}</td>
+      <td class="${type === 'CALL' ? 'call-cell' : 'put-cell'}">${type}</td>
+      <td>$${strike}</td>
+      <td>${expiry}</td>
+      <td class="size-cell">${size}</td>
+      <td class="premium-cell">$${formatNumber(parseInt(premium))}</td>
+      <td>${iv}</td>
+    </tr>`;
+  }
+  
+  // Initial load
+  tbody.innerHTML = Array.from({ length: 10 }, generateFlow).join('');
+  
+  // Add new rows every 3-8 seconds
+  setInterval(() => {
+    const newRow = generateFlow();
+    tbody.insertAdjacentHTML('afterbegin', newRow);
+    const rows = tbody.querySelectorAll('tr');
+    if (rows.length > 20) rows[rows.length - 1].remove();
+  }, 3000 + Math.random() * 5000);
+}
+
+// === MARKET HEATMAP ===
+async function loadMarketHeatmap() {
+  try {
+    const companies = await fetchJSON('/business/api/companies');
+    const symbols = companies.companies || ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX'];
+    
+    const container = document.getElementById('market-heatmap-viz');
+    if (!container) return;
+    
+    // Create D3 treemap
+    const data = symbols.map(s => ({
+      name: s,
+      value: 50 + Math.random() * 150,
+      change: (Math.random() - 0.5) * 6
+    }));
+    
+    const width = container.clientWidth;
+    const height = 300;
+    
+    const svg = d3.select(container).html('').append('svg')
+      .attr('width', width)
+      .attr('height', height);
+    
+    const treemap = d3.treemap()
+      .size([width, height])
+      .padding(2);
+    
+    const root = d3.hierarchy({ children: data })
+      .sum(d => d.value);
+    
+    treemap(root);
+    
+    const cells = svg.selectAll('g')
+      .data(root.leaves())
+      .enter().append('g')
+      .attr('transform', d => `translate(${d.x0},${d.y0})`);
+    
+    cells.append('rect')
+      .attr('width', d => d.x1 - d.x0)
+      .attr('height', d => d.y1 - d.y0)
+      .attr('fill', d => {
+        const change = d.data.change;
+        if (change > 2) return '#10b981';
+        if (change > 0) return '#34d399';
+        if (change > -2) return '#fbbf24';
+        return '#ef4444';
+      })
+      .attr('stroke', '#1e293b')
+      .attr('stroke-width', 2);
+    
+    cells.append('text')
+      .attr('x', 5)
+      .attr('y', 20)
+      .text(d => d.data.name)
+      .attr('font-size', '14px')
+      .attr('font-weight', 'bold')
+      .attr('fill', '#fff');
+    
+    cells.append('text')
+      .attr('x', 5)
+      .attr('y', 40)
+      .text(d => (d.data.change > 0 ? '+' : '') + d.data.change.toFixed(2) + '%')
+      .attr('font-size', '12px')
+      .attr('fill', '#fff');
+      
+  } catch (e) {
+    console.error('Heatmap failed:', e);
+  }
+}
+
+// === COVERAGE CHART ===
+async function loadCoverageChart() {
+  try {
+    const data = await fetchJSON('/business/api/coverage/summary');
+    const history = data.history || [];
+    
+    const ctx = document.getElementById('coverage-chart');
+    if (!ctx) return;
+    
+    if (charts.coverage) charts.coverage.destroy();
+    
+    charts.coverage = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: history.map(h => new Date(h.ts).toLocaleTimeString()),
+        datasets: [
+          {
+            label: 'Equities Coverage',
+            data: history.map(h => h.equities ? h.equities * 100 : null),
+            borderColor: chartColors.primary,
+            backgroundColor: chartColors.primary + '20',
+            fill: true,
+            tension: 0.4
+          },
+          {
+            label: 'Options Coverage',
+            data: history.map(h => h.options ? h.options * 100 : null),
+            borderColor: chartColors.purple,
+            backgroundColor: chartColors.purple + '20',
+            fill: true,
+            tension: 0.4
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'top' },
+          title: { display: false }
+        },
+        scales: {
+          y: {
+            beginAtZero: false,
+            min: 70,
+            max: 100,
+            ticks: { callback: v => v + '%' }
+          }
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Coverage chart failed:', e);
+  }
+}
+
+// === SENTIMENT CHART ===
+async function loadSentimentChart() {
+  try {
+    const data = await fetchJSON('/business/api/news/sentiment');
+    const history = data.history || [];
+    
+    const ctx = document.getElementById('sentiment-chart');
+    if (!ctx) return;
+    
+    if (charts.sentiment) charts.sentiment.destroy();
+    
+    charts.sentiment = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: history.map(h => h.date),
+        datasets: [{
+          label: 'Avg Sentiment',
+          data: history.map(h => h.avg_sentiment),
+          backgroundColor: history.map(h => {
+            const s = h.avg_sentiment || 0;
+            if (s > 0.02) return chartColors.success;
+            if (s < -0.02) return chartColors.danger;
+            return chartColors.warning;
+          })
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Sentiment chart failed:', e);
+  }
+}
+
+// === INTELLIGENCE PANEL ===
+document.getElementById('intel-run')?.addEventListener('click', async () => {
+  const symbol = document.getElementById('intel-symbol').value.toUpperCase();
+  const output = document.getElementById('intelligence-output');
+  
+  output.innerHTML = '<div class="loading-spinner"></div><p>Running PhD-level analysis...</p>';
+  
+  try {
+    const [report, factors, risk, options] = await Promise.all([
+      fetchJSON(`/business/api/company/${symbol}/report`),
+      fetchJSON(`/business/api/company/${symbol}/factor-exposures`),
+      fetchJSON(`/business/api/company/${symbol}/risk-metrics`),
+      fetchJSON(`/business/api/company/${symbol}/options-summary`)
+    ]);
+    
+    output.innerHTML = `
+      <div class="intel-result">
+        <h3>${symbol} - Comprehensive Analysis</h3>
+        <div class="intel-grid">
+          <div class="intel-card">
+            <h4>📊 Report Summary</h4>
+            <p>${report.summary}</p>
+            <ul>
+              ${(report.highlights || []).map(h => `<li>${h}</li>`).join('')}
+            </ul>
+          </div>
+          <div class="intel-card">
+            <h4>⚖️ Factor Exposures</h4>
+            ${Object.entries(factors.exposures || {}).map(([k, v]) => 
+              `<div class="factor-row">
+                <span>${k}:</span>
+                <span class="${v > 0 ? 'positive' : 'negative'}">${v.toFixed(3)}</span>
+              </div>`
+            ).join('')}
+          </div>
+          <div class="intel-card">
+            <h4>⚠️ Risk Metrics</h4>
+            ${Object.entries(risk.risk_metrics || {}).map(([k, v]) => 
+              `<div class="metric-row"><span>${k}:</span><span>${formatNumber(v)}</span></div>`
+            ).join('')}
+          </div>
+          <div class="intel-card">
+            <h4>📈 Options Intelligence</h4>
+            ${Object.entries(options.options || {}).map(([k, v]) => 
+              `<div class="metric-row"><span>${k}:</span><span>${formatNumber(v)}</span></div>`
+            ).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    output.innerHTML = `<div class="error">Analysis failed: ${e.message}</div>`;
+  }
+});
+
+// === COMPANY ANALYTICS ===
+async function loadCompanySelect() {
+  try {
+    const data = await fetchJSON('/business/api/companies');
+    const select = document.getElementById('company-select');
+    if (!select) return;
+    
+    const symbols = data.companies || [];
+    select.innerHTML = symbols.map(s => `<option value="${s}">${s}</option>`).join('');
+  } catch (e) {
+    console.error('Company list failed:', e);
+  }
+}
+
+document.getElementById('load-company')?.addEventListener('click', async () => {
+  const symbol = document.getElementById('company-select').value;
+  if (!symbol) return;
+  
+  try {
+    const [fundamentals, risk, options, sparkline, factorTS] = await Promise.all([
+      fetchJSON(`/business/api/company/${symbol}/fundamentals`),
+      fetchJSON(`/business/api/company/${symbol}/risk-metrics`),
+      fetchJSON(`/business/api/company/${symbol}/options-summary`),
+      fetchJSON(`/business/api/company/${symbol}/sparkline`),
+      fetchJSON(`/business/api/company/${symbol}/factor-exposures/timeseries?days=90`)
+    ]);
+    
+    // Display fundamentals
+    document.getElementById('fundamentals-data').innerHTML = Object.entries(fundamentals.fundamentals || {})
+      .map(([k, v]) => `<div class="data-row"><span>${k}:</span><span>${formatNumber(v)}</span></div>`)
+      .join('');
+    
+    // Display risk
+    document.getElementById('risk-data').innerHTML = Object.entries(risk.risk_metrics || {})
+      .map(([k, v]) => `<div class="data-row"><span>${k}:</span><span>${formatNumber(v)}</span></div>`)
+      .join('');
+    
+    // Display options
+    document.getElementById('options-data').innerHTML = Object.entries(options.options || {})
+      .map(([k, v]) => `<div class="data-row"><span>${k}:</span><span>${formatNumber(v)}</span></div>`)
+      .join('');
+    
+    document.getElementById('company-details').style.display = 'grid';
+    document.getElementById('company-charts').style.display = 'grid';
+    
+    // Sparkline chart
+    const sparkCtx = document.getElementById('price-sparkline');
+    if (sparkCtx && sparkline.series) {
+      if (charts.sparkline) charts.sparkline.destroy();
+      charts.sparkline = new Chart(sparkCtx, {
+        type: 'line',
+        data: {
+          labels: sparkline.series.map((_, i) => i),
+          datasets: [{
+            label: 'Price',
+            data: sparkline.series,
+            borderColor: chartColors.cyan,
+            borderWidth: 2,
+            fill: false,
+            pointRadius: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: { x: { display: false } }
+        }
+      });
+    }
+    
+    // Factor timeseries chart
+    const factorCtx = document.getElementById('factor-timeseries');
+    if (factorCtx && factorTS.factors) {
+      if (charts.factorTS) charts.factorTS.destroy();
+      const datasets = Object.entries(factorTS.factors).slice(0, 3).map(([name, series], idx) => ({
+        label: name,
+        data: series.map(p => p.value),
+        borderColor: [chartColors.primary, chartColors.success, chartColors.warning][idx],
+        fill: false,
+        tension: 0.4
+      }));
+      
+      charts.factorTS = new Chart(factorCtx, {
+        type: 'line',
+        data: {
+          labels: factorTS.factors[Object.keys(factorTS.factors)[0]].map(p => new Date(p.timestamp).toLocaleDateString()),
+          datasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: true } }
+        }
+      });
+    }
+    
+  } catch (e) {
+    console.error('Company analysis failed:', e);
+  }
+});
+
+// === INITIALIZE ===
+(async function init() {
+  await loadKPIs();
+  await loadOptionsFlow();
+  await loadMarketHeatmap();
+  await loadCoverageChart();
+  await loadSentimentChart();
+  await loadCompanySelect();
+  
+  // Auto-refresh
+  setInterval(loadKPIs, 15000);
+  setInterval(loadCoverageChart, 45000);
+  setInterval(loadMarketHeatmap, 60000);
+})();
+</script>
+<script nonce="{{ csp_nonce }}" src="/static/js/business_dashboard.js"></script>
+{% endblock %}

@@ -11,6 +11,10 @@ from typing import Dict, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import redis.asyncio as redis
+try:
+    from trading_common.config import get_settings  # type: ignore
+except Exception:  # pragma: no cover
+    get_settings = None
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,25 @@ class TradingGovernor:
     """
     
     def __init__(self):
-        self.redis = redis.Redis(host='localhost', port=6379, decode_responses=True)
+        # Use central settings when available to avoid hardcoded localhost
+        redis_url = None
+        password = None
+        if get_settings:
+            try:
+                settings = get_settings()
+                redis_url = settings.database.redis_url
+                password = settings.database.redis_password
+            except Exception:
+                pass
+        redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.redis = redis.from_url(
+            redis_url,
+            password=password or os.getenv("REDIS_PASSWORD"),
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
         self.mode = TradingMode.PAPER
         self.settings_key = "trading:governor:settings"
         self.limits_key = "trading:governor:limits"

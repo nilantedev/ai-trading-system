@@ -15,7 +15,8 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 # Install with specific optimizations for production
-RUN pip install --no-cache-dir --user --compile --no-deps -r requirements.txt
+# Note: Do NOT use --no-deps here because uvicorn[standard] requires extras like uvloop/httptools
+RUN pip install --no-cache-dir --user --compile -r requirements.txt
 
 # Production image - use distroless for smaller size and security
 FROM python:3.11-slim
@@ -43,6 +44,9 @@ COPY --from=builder --chown=trading:trading /root/.local /home/trading/.local
 COPY --chown=trading:trading api/ ./api/
 COPY --chown=trading:trading services/ ./services/
 COPY --chown=trading:trading shared/ ./shared/
+COPY --chown=trading:trading scripts/ ./scripts/
+COPY --chown=trading:trading alembic.ini ./alembic.ini
+COPY --chown=trading:trading migrations/ ./migrations/
 COPY --chown=trading:trading config/*.py ./config/
 COPY --chown=trading:trading config/logging.yaml ./config/logging.yaml
 COPY --chown=trading:trading requirements.txt ./

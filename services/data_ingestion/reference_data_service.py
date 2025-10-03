@@ -107,10 +107,20 @@ class ReferenceDataService:
             headers={'User-Agent': 'AI-Trading-System/1.0'}
         )
         
-        # Initialize cache and Redis
-        self.cache = get_trading_cache()
+        # Initialize cache (async) and Redis client
+        try:
+            self.cache = await get_trading_cache()  # ensure TradingCache initialized
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to initialize trading cache: %s", e)
+            self.cache = None
+
         self.redis_client = get_redis_client()
-        
+        try:
+            await self.redis_client.connect()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Redis connection unavailable during startup: %s", e)
+            self.redis_client = None
+
         # Initialize reference data
         await self._initialize_reference_data()
     
@@ -130,6 +140,14 @@ class ReferenceDataService:
                 cached_data = await self.redis_client.get(cache_key)
                 if cached_data:
                     data = json.loads(cached_data)
+                    # Normalize datetime fields possibly serialized as string
+                    if isinstance(data.get('last_updated'), str):
+                        try:
+                            # Attempt to parse ISO-like string
+                            from datetime import datetime as _dt
+                            data['last_updated'] = _dt.fromisoformat(data['last_updated'].replace('Z', '+00:00'))
+                        except Exception:  # noqa: BLE001
+                            pass
                     return SecurityInfo(**data)
             except Exception as e:
                 logger.warning(f"Cache error for {symbol}: {e}")
@@ -187,11 +205,105 @@ class ReferenceDataService:
             try:
                 custom_symbols = await self.redis_client.smembers("watchlist:symbols")
                 if custom_symbols:
-                    return list(custom_symbols)
+                    # Return sorted for determinism in orchestrations
+                    return sorted(list(custom_symbols))
             except Exception as e:
                 logger.warning(f"Failed to get custom watchlist: {e}")
         
         return self.default_symbols.copy()
+
+    async def populate_watchlist_from_polygon(
+        self,
+        *,
+        locale: str = "us",
+        market: str = "stocks",
+        active: bool = True,
+        types: str | None = None,
+        page_limit: int = 1000,
+        max_pages: int | None = None,
+    ) -> int:
+        """Populate Redis watchlist from Polygon v3 reference/tickers.
+
+        Returns number of symbols added. Idempotent due to Redis set semantics.
+        """
+        if not self.polygon_config['api_key']:
+            raise RuntimeError("Polygon API key not configured")
+        if not self.session:
+            # Ensure session exists
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={'User-Agent': 'AI-Trading-System/1.0'}
+            )
+        if not self.redis_client:
+            raise RuntimeError("Redis not available to store watchlist")
+
+        base_url = f"{self.polygon_config['base_url']}/v3/reference/tickers"
+        params = {
+            'apikey': self.polygon_config['api_key'],
+            'locale': locale,
+            'market': market,
+            'active': 'true' if active else 'false',
+            'limit': str(page_limit),
+        }
+        if types:
+            params['types'] = types
+
+        added = 0
+        page = 0
+        cursor: str | None = None
+        try:
+            while True:
+                page += 1
+                q = dict(params)
+                if cursor:
+                    q['cursor'] = cursor
+                async with self.session.get(base_url, params=q) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise RuntimeError(f"Polygon tickers HTTP {resp.status}: {text[:200]}")
+                    data = await resp.json()
+                results = data.get('results') or []
+                if not isinstance(results, list):
+                    results = []
+                tickers = []
+                for it in results:
+                    sym = it.get('ticker') or it.get('symbol')
+                    if not sym:
+                        continue
+                    # Filter to plain ASCII tickers and uppercase
+                    sym = str(sym).strip().upper()
+                    if not sym:
+                        continue
+                    tickers.append(sym)
+                if tickers:
+                    try:
+                        await self.redis_client.sadd("watchlist:symbols", *tickers)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Failed to add batch to watchlist: {e}")
+                    added += len(tickers)
+                # Pagination: Polygon v3 uses 'next_url' or a 'cursor' token
+                cursor = data.get('next_url') or data.get('next') or data.get('next_cursor') or data.get('cursor')
+                if cursor and isinstance(cursor, str):
+                    # Some variants return full URL; if so, parse cursor param
+                    if cursor.startswith('http'):
+                        try:
+                            import urllib.parse as _url
+                            parsed = _url.urlparse(cursor)
+                            qs = _url.parse_qs(parsed.query)
+                            cur_list = qs.get('cursor')
+                            cursor = cur_list[0] if cur_list else None
+                        except Exception:  # noqa: BLE001
+                            pass
+                if not cursor:
+                    break
+                if max_pages and page >= max_pages:
+                    break
+                # Gentle pacing to avoid rate limits
+                await asyncio.sleep(0.2)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"populate_watchlist_from_polygon error: {e}")
+            raise
+        return added
     
     async def add_to_watchlist(self, symbols: List[str]) -> bool:
         """Add symbols to watchlist."""

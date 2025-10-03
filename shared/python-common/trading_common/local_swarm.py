@@ -20,7 +20,7 @@ class LocalAgent:
     """Local agent that uses Ollama models."""
     name: str
     instructions: str
-    model: str = "mixtral:8x7b"  # Default fast model
+    model: str = "mixtral:8x22b"  # Default fast model
     functions: List[Callable] = field(default_factory=list)
     
     async def execute(self, prompt: str, context: Dict[str, Any] = None) -> str:
@@ -210,35 +210,36 @@ class LocalSwarm:
         }
 
 
-# Best open-source models for specific trading tasks
+# Best open-source models for specific trading tasks (aligned with installed set)
+# Installed models: phi3:14b, solar:10.7b, yi:34b, command-r-plus:104b, deepseek-v3:latest, mixtral:8x22b, qwen2.5:72b
 RECOMMENDED_MODELS = {
     "market_analysis": {
-        "model": "qwen2.5:72b",  # Excellent for analysis
-        "fallback": "mixtral:8x7b"
+        "model": "qwen2.5:72b",  # Strong analytical reasoning
+        "fallback": "mixtral:8x22b"
     },
     "risk_assessment": {
-        "model": "deepseek-r1:70b",  # Strong reasoning
-        "fallback": "llama3.1:70b"
+        "model": "deepseek-v3:latest",  # Strong reasoning capabilities
+        "fallback": "qwen2.5:72b"
     },
     "strategy_generation": {
-        "model": "llama3.1:70b",  # Creative and strategic
-        "fallback": "mistral:7b"
+        "model": "qwen2.5:72b",  # Creative and strategic
+        "fallback": "phi3:14b"
     },
     "sentiment_analysis": {
-        "model": "phi3:medium",  # Fast and efficient
-        "fallback": "gemma2:9b"
+        "model": "phi3:14b",  # Fast and efficient
+        "fallback": "solar:10.7b"
     },
     "news_summarization": {
-        "model": "mistral:7b",  # Good at summarization
-        "fallback": "gemma:7b"
+        "model": "phi3:14b",  # Good at summarization & concise output
+        "fallback": "mixtral:8x22b"
     },
     "portfolio_optimization": {
-        "model": "codellama:34b",  # Math and optimization
-        "fallback": "mixtral:8x7b"
+        "model": "deepseek-v3:latest",  # Reasoning & math
+        "fallback": "yi:34b"
     },
     "execution_planning": {
-        "model": "mixtral:8x7b",  # Fast decision making
-        "fallback": "mistral:7b"
+        "model": "mixtral:8x22b",  # Fast decision making
+        "fallback": "phi3:14b"
     }
 }
 

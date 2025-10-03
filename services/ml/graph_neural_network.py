@@ -24,6 +24,10 @@ from scipy.stats import spearmanr, pearsonr
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, accuracy_score
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 

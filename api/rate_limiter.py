@@ -9,7 +9,8 @@ import time
 import logging
 import hashlib
 import hmac
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Set, List
+import ipaddress
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
@@ -17,6 +18,12 @@ from fastapi import HTTPException, Request, Response
 import redis.asyncio as redis
 import os
 import json
+
+# Settings import (lazy shared configuration) – avoids hardcoded localhost fallbacks
+try:
+    from trading_common.config import get_settings  # type: ignore
+except Exception:  # pragma: no cover - extremely defensive; service should still start
+    get_settings = None  # fallback; will handle gracefully below
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +48,48 @@ class RateLimitConfig:
 
 
 class EnhancedRateLimiter:
-    """Enhanced rate limiter with strict security enforcement"""
-    
+    """Enhanced rate limiter with strict security enforcement.
+
+    Redis URL precedence (highest first):
+      1. Explicit constructor argument `redis_url`
+      2. Environment variable REDIS_URL (legacy / override)
+      3. Settings: get_settings().database.redis_url (preferred in Docker)
+      4. Safe fallback "redis://localhost:6379/0" (last resort; should not persist in prod)
+    """
+
     def __init__(self, redis_url: Optional[str] = None):
-        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
-        self.redis_password = os.getenv("REDIS_PASSWORD")
-        self.redis: Optional[aioredis.Redis] = None
+        # Load shared settings if available
+        self._settings = None
+        if get_settings is not None:
+            try:
+                self._settings = get_settings()
+            except Exception:
+                # Settings failure should not block construction; will fallback
+                self._settings = None
+
+        # Determine final Redis URL
+        env_url = os.getenv("REDIS_URL")
+        settings_url = None
+        settings_password = None
+        if self._settings is not None:
+            try:
+                settings_url = self._settings.database.redis_url
+                settings_password = self._settings.database.redis_password
+            except Exception:
+                pass
+
+        self.redis_url = redis_url or env_url or settings_url or "redis://localhost:6379/0"
+        # Password precedence: explicit env REDIS_PASSWORD > settings password > password embedded in URL
+        self.redis_password = os.getenv("REDIS_PASSWORD") or settings_password
+
+        # Redis client instance (redis.asyncio.Redis)
+        self.redis: Optional[redis.Redis] = None
         self.mode = RateLimitMode.NORMAL
         self.connected = False
         
         # Security settings
         self.enforce_fail_closed = os.getenv("ENFORCE_FAIL_CLOSED", "true").lower() == "true"
-        self.environment = os.getenv("ENVIRONMENT", "development")
+        self.environment = os.getenv("ENVIRONMENT", "production")
         self.is_production = self.environment in ["production", "staging", "prod"]
         
         # Connection health tracking
@@ -62,7 +99,20 @@ class EnhancedRateLimiter:
         
         # Trusted IPs that bypass rate limiting (carefully managed)
         self.trusted_ips: Set[str] = set()
+        self.trusted_cidrs: List[ipaddress._BaseNetwork] = []  # IPv4Network/IPv6Network
         self._load_trusted_ips()
+        
+        # Public probe paths allowed during outages (fail-closed or no Redis)
+        self.fail_closed_public_paths: Set[str] = {
+            "/admin/availability",
+            "/business/api/kpis",
+        }
+        extra_paths = os.getenv("FAIL_CLOSED_PUBLIC_PATHS", "").strip()
+        if extra_paths:
+            for p in extra_paths.split(","):
+                p = p.strip()
+                if p:
+                    self.fail_closed_public_paths.add(p)
         
         # Rate limit configurations with security-first defaults
         self.rate_limits = {
@@ -106,20 +156,68 @@ class EnhancedRateLimiter:
                     logger.info(f"Loaded {len(self.trusted_ips)} trusted IPs")
                 else:
                     logger.error("Trusted IPs signature verification failed")
+        # CIDR ranges (signed, similar format)
+        trusted_cidrs_env = os.getenv("RATE_LIMIT_TRUSTED_CIDRS", "")
+        if trusted_cidrs_env:
+            parts = trusted_cidrs_env.split(":")
+            if len(parts) == 2:
+                cidrs_data, signature = parts
+                expected_sig = hmac.new(
+                    os.getenv("TRUSTED_IP_SECRET", "").encode(),
+                    cidrs_data.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                if hmac.compare_digest(signature, expected_sig):
+                    for c in cidrs_data.split(","):
+                        c = c.strip()
+                        if not c:
+                            continue
+                        try:
+                            net = ipaddress.ip_network(c, strict=False)
+                            self.trusted_cidrs.append(net)
+                        except Exception as e:
+                            logger.warning(f"Invalid trusted CIDR '{c}': {e}")
+                    if self.trusted_cidrs:
+                        logger.info(f"Loaded {len(self.trusted_cidrs)} trusted CIDR ranges")
+                else:
+                    logger.error("Trusted CIDRs signature verification failed")
+
+    def _is_trusted_client(self, ip: Optional[str]) -> bool:
+        if not ip:
+            return False
+        if ip in self.trusted_ips:
+            return True
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            for net in self.trusted_cidrs:
+                if ip_obj in net:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _is_public_probe_path(self, path: str) -> bool:
+        try:
+            norm = path.split("?")[0].strip()  # ignore query
+        except Exception:
+            norm = path
+        norm = norm.lower()
+        return norm in self.fail_closed_public_paths
     
     async def initialize(self):
         """Initialize Redis connection with strict fail-closed enforcement"""
         try:
             # Create Redis connection
-            self.redis = aioredis.from_url(
+            # Use redis.asyncio high-level helper
+            self.redis = redis.from_url(
                 self.redis_url,
                 password=self.redis_password,
                 encoding="utf-8",
                 decode_responses=True,
-                socket_connect_timeout=3,  # Shorter timeout for faster failure detection
+                socket_connect_timeout=3,
                 socket_timeout=3,
-                retry_on_timeout=False,  # Don't retry on timeout
-                health_check_interval=10  # Regular health checks
+                retry_on_timeout=False,
+                health_check_interval=10,
             )
             
             # Test connection with strict timeout
@@ -247,8 +345,8 @@ class EnhancedRateLimiter:
         """
         self.metrics["total_requests"] += 1
         
-        # Check trusted IPs (with caution)
-        if request and request.client and request.client.host in self.trusted_ips:
+        # Check trusted IPs/CIDRs (with caution)
+        if request and request.client and self._is_trusted_client(request.client.host):
             return self._create_rate_limit_response(
                 allowed=True,
                 current_requests=0,
@@ -262,12 +360,15 @@ class EnhancedRateLimiter:
         if self.mode == RateLimitMode.FAIL_CLOSED:
             self.metrics["fail_closed_denials"] += 1
             
-            # Allow only critical health checks
-            if limit_type == "health" and request and "/health" in request.url.path:
+            # Allow only critical health checks and pre-approved public probe paths
+            if request and (
+                (limit_type == "health" and "/health" in request.url.path)
+                or self._is_public_probe_path(request.url.path)
+            ):
                 return self._create_rate_limit_response(
                     allowed=True,
                     current_requests=0,
-                    limit=1,
+                    limit=5,
                     window=60,
                     reset_time=time.time() + 60,
                     mode=self.mode.value,
@@ -324,8 +425,17 @@ class EnhancedRateLimiter:
                         error="Rate limiting error - request denied for security"
                     )
         
-        # No Redis connection in production = deny
+        # No Redis connection in production = deny, except allowlisted probe/public paths
         if self.is_production and self.enforce_fail_closed:
+            if request and self._is_public_probe_path(request.url.path):
+                return self._create_rate_limit_response(
+                    allowed=True,
+                    current_requests=0,
+                    limit=5,
+                    window=60,
+                    reset_time=time.time() + 60,
+                    warning="Rate limiter unavailable - allowing public probe"
+                )
             self.metrics["blocked_requests"] += 1
             return self._create_rate_limit_response(
                 allowed=False,

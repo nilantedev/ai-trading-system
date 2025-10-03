@@ -25,6 +25,10 @@ from captum.attr import (
 )
 import json
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import get_logger, get_settings
 
 logger = get_logger(__name__)

@@ -1,0 +1,31 @@
+groups:
+  - name: provider-reliability
+    interval: 30s
+    rules:
+      - alert: ProviderTimeoutSurge
+        expr: |
+          sum by (provider) (rate(provider_timeout_total[10m]))
+            /
+          clamp_min(sum by (provider) (rate(provider_attempts_total[10m])), 1)
+            > 0.20
+        for: 15m
+        labels:
+          severity: warning
+          category: providers
+        annotations:
+            summary: "Timeout surge for provider {{ $labels.provider }}"
+            description: |-
+              More than 20% of attempts timing out over 10m window. Investigate network latency, upstream degradation, or rate limits.
+      - alert: ProviderRetryAmplificationHigh
+        expr: |
+          (sum by (provider) (rate(provider_attempts_total[15m]))
+            /
+           clamp_min(sum by (provider) (rate(provider_requests_total{status="success"}[15m])), 1)) > 2.5
+        for: 20m
+        labels:
+          severity: warning
+          category: providers
+        annotations:
+          summary: "High retry amplification for provider {{ $labels.provider }}"
+          description: |-
+            Attempts per successful request >2.5 over 15m. Upstream instability or overly aggressive retry settings. Review retry/backoff and provider status.

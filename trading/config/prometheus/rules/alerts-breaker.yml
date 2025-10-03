@@ -1,0 +1,42 @@
+groups:
+  - name: resilience-circuit-breaker
+    interval: 30s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state==2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.breaker }}"
+          description: "Breaker {{ $labels.breaker }} (service={{ $labels.service }}) open >2m. Downstream dependency failing or unstable. Investigate dependency health and recent deploys."
+
+      - alert: CircuitBreakerFlapping
+        expr: increase(circuit_breaker_transitions_total[10m]) > 20
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker flapping for {{ $labels.breaker }}"
+          description: ">20 state transitions in 10m for breaker {{ $labels.breaker }}. Indicates instability or misconfigured thresholds."
+
+  - name: resilience-adaptive-bucket
+    interval: 30s
+    rules:
+      - alert: AdaptiveRateThrottled
+        expr: adaptive_token_bucket_rate < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Adaptive token bucket heavily throttled"
+          description: "Bucket {{ $labels.bucket }} (service={{ $labels.service }}) rate <10 tokens/s for 5m. Sustained errors or latency causing aggressive backoff."
+
+      - alert: AdaptiveTokensStarved
+        expr: adaptive_token_bucket_tokens < 1
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Token bucket starved"
+          description: "Bucket {{ $labels.bucket }} consistently empty. Throughput may be constrained; evaluate raising base rate or resolving upstream slowdowns."

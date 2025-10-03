@@ -1,4 +1,5 @@
-version: '3.9'
+ 
+version: "3.9"
 
 services:
   # PostgreSQL Database
@@ -26,18 +27,406 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trading-redis
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 128gb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 20s
     networks:
       - trading-network
+    mem_limit: 128g
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  # Redis Exporter for Prometheus
+  redis-exporter:
+    # Use alpine variant to enable container-level healthcheck utilities
+    image: oliver006/redis_exporter:alpine
+    container_name: trading-redis-exporter
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - trading-network
+    healthcheck:
+      # Probe the metrics endpoint; exporter listens on 0.0.0.0:9121 inside container
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9121/metrics || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Data Ingestion Service
+  data-ingestion:
+    build:
+      context: .
+      dockerfile: services/data_ingestion/Dockerfile
+      args:
+        - BUILD_ENV=production
+    # Standardize the container name to avoid random prefixed names from prior runs
+    container_name: trading-data-ingestion
+    environment:
+      # Database connections
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:?DB_USER required}:${DB_PASSWORD:?DB_PASSWORD required}@postgres:5432/${DB_NAME:?DB_NAME required}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      # QuestDB connectivity
+      QUESTDB_HOST: ${QUESTDB_HOST:-trading-questdb}
+      QUESTDB_HTTP_PORT: ${QUESTDB_HTTP_PORT:-9000}
+      QUESTDB_HTTP_URL: ${QUESTDB_HTTP_URL:-http://trading-questdb:9000/exec}
+      # Calendar provider defaults (Alpha Vantage upcoming + optional EODHD historical)
+      CALENDAR_PROVIDER: ${CALENDAR_PROVIDER:-alphavantage}
+      ALPHAVANTAGE_API_KEY: ${ALPHAVANTAGE_API_KEY:-}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      EODHD_API_KEY: ${EODHD_API_KEY:-}
+      AV_EARNINGS_CALENDAR_HORIZON: ${AV_EARNINGS_CALENDAR_HORIZON:-3month}
+      # After-hours automation flags (pass-through)
+      ENABLE_EQUITIES_COVERAGE_REPORT: ${ENABLE_EQUITIES_COVERAGE_REPORT:-false}
+      EQUITIES_COVERAGE_INTERVAL_SECONDS: ${EQUITIES_COVERAGE_INTERVAL_SECONDS:-86400}
+      ENABLE_OPTIONS_COVERAGE_REPORT: ${ENABLE_OPTIONS_COVERAGE_REPORT:-false}
+      OPTIONS_COVERAGE_INTERVAL_SECONDS: ${OPTIONS_COVERAGE_INTERVAL_SECONDS:-86400}
+      OPTIONS_COVERAGE_MAX_UNDERLYINGS: ${OPTIONS_COVERAGE_MAX_UNDERLYINGS:-200}
+      WEAVIATE_RECONCILE_INTERVAL_SECONDS: ${WEAVIATE_RECONCILE_INTERVAL_SECONDS:-900}
+      WEAVIATE_RECONCILE_LOOKBACK_DAYS: ${WEAVIATE_RECONCILE_LOOKBACK_DAYS:-3}
+      WEAVIATE_RECONCILE_LIMIT: ${WEAVIATE_RECONCILE_LIMIT:-2000}
+      ENABLE_WEAVIATE_SCHEMA_ENSURE: ${ENABLE_WEAVIATE_SCHEMA_ENSURE:-true}
+  # Enable full persistence for news/social and vector indexing
+      ENABLE_QUESTDB_NEWS_PERSIST: ${ENABLE_QUESTDB_NEWS_PERSIST:-true}
+      ENABLE_POSTGRES_NEWS_PERSIST: ${ENABLE_POSTGRES_NEWS_PERSIST:-true}
+      ENABLE_WEAVIATE_PERSIST: ${ENABLE_WEAVIATE_PERSIST:-true}
+      ENABLE_QUESTDB_SOCIAL_PERSIST: ${ENABLE_QUESTDB_SOCIAL_PERSIST:-true}
+      ENABLE_WEAVIATE_SOCIAL_PERSIST: ${ENABLE_WEAVIATE_SOCIAL_PERSIST:-true}
+  # Enable vector reconcile loop for Weaviate indexing
+      ENABLE_WEAVIATE_RECONCILE: ${ENABLE_WEAVIATE_RECONCILE:-true}
+      WEAVIATE_HEALTH_TIMEOUT_SECONDS: ${WEAVIATE_HEALTH_TIMEOUT_SECONDS:-3}
+  # Enable live streams and daily delta/options loops
+      ENABLE_NEWS_STREAM: ${ENABLE_NEWS_STREAM:-true}
+      ENABLE_SOCIAL_STREAM: ${ENABLE_SOCIAL_STREAM:-true}
+      ENABLE_QUOTE_STREAM: ${ENABLE_QUOTE_STREAM:-true}
+    # Allow quote stream to run outside trading hours for catch-up/testing
+      QUOTE_STREAM_TRADING_HOURS_ONLY: ${QUOTE_STREAM_TRADING_HOURS_ONLY:-false}
+      ENABLE_DAILY_DELTA: ${ENABLE_DAILY_DELTA:-true}
+      ENABLE_DAILY_OPTIONS: ${ENABLE_DAILY_OPTIONS:-true}
+  # Historical one-shots at startup
+      ENABLE_NEWS_HISTORICAL_BACKFILL: ${ENABLE_NEWS_HISTORICAL_BACKFILL:-true}
+      ENABLE_SOCIAL_HISTORICAL_BACKFILL: ${ENABLE_SOCIAL_HISTORICAL_BACKFILL:-true}
+    # Enable news backlog reindexer for historical vector indexing
+      ENABLE_NEWS_BACKLOG_REINDEX: ${ENABLE_NEWS_BACKLOG_REINDEX:-true}
+      NEWS_BACKFILL_YEARS: ${NEWS_BACKFILL_YEARS:-5}
+      SOCIAL_BACKFILL_YEARS: ${SOCIAL_BACKFILL_YEARS:-1}
+  # Calendar provider defaults already set; backfill endpoints used post-start
+      ENABLE_HOUSEKEEPING: ${ENABLE_HOUSEKEEPING:-false}
+      HOUSEKEEPING_INTERVAL_SECONDS: ${HOUSEKEEPING_INTERVAL_SECONDS:-21600}
+      HOUSEKEEPING_AGE_DAYS: ${HOUSEKEEPING_AGE_DAYS:-30}
+      HOUSEKEEPING_BUCKET: ${HOUSEKEEPING_BUCKET:-trading}
+      HOUSEKEEPING_PREFIX: ${HOUSEKEEPING_PREFIX:-archives/ops-json}
+      HOUSEKEEPING_PATHS: ${HOUSEKEEPING_PATHS:-/srv,/srv/ai-trading-system}
+      HOUSEKEEPING_PATTERNS: ${HOUSEKEEPING_PATTERNS:-coverage_snapshot*.json,coverage_snapshot_full*.json,coverage_run_latest.json,coverage_summary_consolidated.json,retention_*_questdb.json,*_seed_report*.json,*_seed_checkpoint*.json,backfill_progress.json,storage_projection_*.json}
+      ENABLE_MINIO_ARTIFACT_UPLOAD: ${ENABLE_MINIO_ARTIFACT_UPLOAD:-false}
+      ARTIFACT_UPLOAD_INTERVAL_SECONDS: ${ARTIFACT_UPLOAD_INTERVAL_SECONDS:-21600}
+      # Analytics persistence (system/trading KPIs -> QuestDB)
+      ENABLE_ANALYTICS_PERSIST: ${ENABLE_ANALYTICS_PERSIST:-true}
+      ANALYTICS_PERSIST_INTERVAL_SECONDS: ${ANALYTICS_PERSIST_INTERVAL_SECONDS:-300}
+      GRAFANA_EXPORT_DIR: ${GRAFANA_EXPORT_DIR:-/app/export/grafana-csv}
+      MINIO_ARTIFACTS_BUCKET: ${MINIO_ARTIFACTS_BUCKET:-trading}
+      MINIO_ARTIFACTS_PREFIX: ${MINIO_ARTIFACTS_PREFIX:-dashboards}
+      # Vector store (Weaviate) connectivity for fallback indexing
+      DB_WEAVIATE_URL: ${WEAVIATE_URL:-http://trading-weaviate:8080}
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-${WEAVIATE_AUTHENTICATION_APIKEY_ALLOWED_KEYS:-}}
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      # Persist exports (coverage reports, Grafana CSV) and avoid permission issues inside container
+      - /mnt/fastdrive/trading/grafana/csv:/app/export/grafana-csv
+      - /mnt/fastdrive/trading/export:/app/export
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 6
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - trading-network
+      - trading-data-external
+
+  # QuestDB - Time-series database
+  questdb:
+    image: questdb/questdb:7.3.3
+    container_name: trading-questdb
+    environment:
+      - QDB_PG_USER=${DB_USER:-trading_user}
+      - QDB_PG_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "9000:9000"   # HTTP console /exec
+      - "8812:8812"   # PG wire
+    volumes:
+      - /mnt/fastdrive/trading/questdb:/var/lib/questdb
+    healthcheck:
+      # Use netcat via bash's /dev/tcp fallback to avoid wget/curl dependency
+      test: ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/9000' && echo ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+
+  # Weaviate - Vector database
+  weaviate:
+    image: semitechnologies/weaviate:1.25.10
+    container_name: trading-weaviate
+    environment:
+      - QUERY_DEFAULTS_LIMIT=25
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - CLUSTER_HOSTNAME=node1
+      - CLUSTER_GOSSIP_BIND_PORT=7100
+      - CLUSTER_DATA_BIND_PORT=7101
+      - DISABLE_TELEMETRY=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/fastdrive/trading/weaviate:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:8080/v1/.well-known/ready' "]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+
+  # MinIO - Object storage (console 9001)
+  minio:
+    image: minio/minio:latest
+    container_name: trading-minio
+    command: server --console-address ":9001" /data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9001:9001"   # Console/health endpoint
+      - "9002:9000"   # S3 API (mapped to host 9002 to avoid QuestDB clash)
+    volumes:
+      - /mnt/bulkdata/trading/minio:/data
+    healthcheck:
+      # Use /dev/tcp to avoid relying on curl/wget inside the container
+      test: ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/9001' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Traefik - Reverse proxy & TLS termination
+  traefik:
+    image: traefik:v2.11
+    container_name: trading-traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --api.dashboard=true
+      - --api.insecure=true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /mnt/fastdrive/trading/traefik:/letsencrypt
+    networks:
+      - trading-network
+      - trading-data-external
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c '(wget -S -O - http://localhost 2>&1 || true) | grep -q \"HTTP/\"' "]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # Apache Pulsar - Standalone (broker + admin)
+  pulsar:
+    image: apachepulsar/pulsar:3.2.1
+    container_name: trading-pulsar
+    command: ["/bin/bash", "-c", "bin/pulsar standalone"]
+    ports:
+      - "6650:6650"   # broker
+      - "8083:8080"   # admin mapped to 8083 on host
+    volumes:
+      - /mnt/fastdrive/trading/pulsar/standalone:/pulsar/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 2 http://localhost:8080/admin/v2/brokers/health | grep -qi ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Node Exporter - Host metrics
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    container_name: trading-node-exporter
+    pid: host
+    network_mode: host
+    command: ["--path.rootfs=/host"]
+    volumes:
+      - /:/host:ro,rslave
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:9100/-/healthy || wget -q --spider http://localhost:9100/metrics' "]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # cAdvisor - Container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: trading-cadvisor
+    ports:
+      - "8082:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:8080/healthz || wget -q --spider http://localhost:8080/metrics' "]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # Alertmanager
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: trading-alertmanager
+    ports:
+      - "9093:9093"
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    volumes:
+      - ./infrastructure/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:9093/-/healthy' "]
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Ollama - LLM inference server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: trading-ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=1h
+    ports:
+      - "11434:11434"
+    volumes:
+      - /mnt/fastdrive/trading/models/ollama:/root/.ollama
+    healthcheck:
+      # Tool-free TCP readiness check for Ollama API port
+      test: ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/11434' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  # ML Service - Orchestrates intelligence jobs and manages day/night model warmup
+  ml:
+    build:
+      context: .
+      dockerfile: services/ml/Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-ml
+    environment:
+      # Cache / Redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      # QuestDB HTTP for dynamic watchlist resolution
+      QUESTDB_HTTP_URL: ${QUESTDB_HTTP_URL:-http://trading-questdb:9000/exec}
+      # Weaviate (optional)
+      WEAVIATE_URL: ${WEAVIATE_URL:-http://trading-weaviate:8080}
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-${WEAVIATE_AUTHENTICATION_APIKEY_ALLOWED_KEYS:-}}
+      # Ollama connectivity (use service DNS for reliability). Literal to avoid host env override.
+      OLLAMA_HOST: http://ollama:11434
+      # Day/Night warm scheduler
+      ENABLE_WARM_SCHEDULER: ${ENABLE_WARM_SCHEDULER:-true}
+      ML_DAY_HOT_MODELS: ${ML_DAY_HOT_MODELS:-solar:10.7b,phi3:14b}
+      # Add llama3.1:70b to the heavy/night set and remove deepseek entirely
+      ML_NIGHT_HEAVY_MODELS: ${ML_NIGHT_HEAVY_MODELS:-mixtral:8x22b,qwen2.5:72b,command-r-plus:104b,llama3.1:70b,yi:34b}
+      MARKET_HOURS_TZ: ${MARKET_HOURS_TZ:-America/New_York}
+      MARKET_HOURS_OPEN: ${MARKET_HOURS_OPEN:-09:30}
+      MARKET_HOURS_CLOSE: ${MARKET_HOURS_CLOSE:-16:00}
+      # Scheduler enablement (intelligence loops)
+      ENABLE_ML_SCHEDULER: ${ENABLE_ML_SCHEDULER:-true}
+      ML_SCHEDULER_WATCHLIST: ${ML_SCHEDULER_WATCHLIST:-AAPL,MSFT,SPY,TSLA,NVDA,AMZN,QQQ}
+      ML_SCHEDULER_WATCHLIST_SOURCE: ${ML_SCHEDULER_WATCHLIST_SOURCE:-env}
+    ports:
+      - "127.0.0.1:${ML_PORT:-8001}:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+    networks:
+      - trading-network
+      - trading-data-external
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    stop_grace_period: 30s
 
   # API Service - Production configuration with Traefik integration
   api:
@@ -75,6 +464,23 @@ services:
       # Performance
       WORKERS: ${API_WORKERS:-4}
       MAX_CONNECTIONS_PER_WORKER: ${MAX_CONNECTIONS_PER_WORKER:-100}
+      # QuestDB connectivity for health/coverage
+      DB_QUESTDB_HOST: ${DB_QUESTDB_HOST:-trading-questdb}
+      DB_QUESTDB_HTTP_PORT: ${DB_QUESTDB_HTTP_PORT:-9000}
+      DB_QUESTDB_HTTP_URL: ${DB_QUESTDB_HTTP_URL:-http://trading-questdb:9000/exec}
+      # Ingestion service health endpoints (prefer service DNS name to avoid container_name coupling)
+      DATA_INGESTION_EXTENDED_HEALTH: ${DATA_INGESTION_EXTENDED_HEALTH:-http://data-ingestion:8002/health/extended}
+      DATA_INGESTION_HEALTH: ${DATA_INGESTION_HEALTH:-http://data-ingestion:8002/health}
+      DATA_INGESTION_URL: ${DATA_INGESTION_URL:-http://data-ingestion:8002}
+      # Health probing behavior
+      DATA_INGESTION_HEALTH_MODE: ${DATA_INGESTION_HEALTH_MODE:-basic}
+      DATA_INGESTION_EXTENDED_TIMEOUT_SECONDS: ${DATA_INGESTION_EXTENDED_TIMEOUT_SECONDS:-20}
+      DATA_INGESTION_BASIC_TIMEOUT_SECONDS: ${DATA_INGESTION_BASIC_TIMEOUT_SECONDS:-10}
+      # Calendar provider (ingestion service will read these via its own env, but document here for stack)
+      CALENDAR_PROVIDER: ${CALENDAR_PROVIDER:-alphavantage}
+      ALPHAVANTAGE_API_KEY: ${ALPHAVANTAGE_API_KEY:-}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      AV_EARNINGS_CALENDAR_HORIZON: ${AV_EARNINGS_CALENDAR_HORIZON:-3month}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"  # Bind to localhost only
     depends_on:
@@ -82,6 +488,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     volumes:
       - ./logs:/app/logs
       - ./config:/app/config:ro
@@ -90,10 +498,13 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
+      start_period: 40s
       retries: 5
     networks:
       - trading-network
+      - trading-data-external
     restart: unless-stopped
+    stop_grace_period: 30s
     # Additional resource limits for security & stability
     ulimits:
       nofile:
@@ -105,23 +516,205 @@ services:
       resources:
         limits:
           cpus: '4'
-          memory: 4G
+          memory: 16G
         reservations:
           cpus: '2'
-          memory: 2G
+          memory: 8G
     labels:
       # Traefik configuration
       - "traefik.enable=true"
-      - "traefik.http.routers.api.rule=Host(`api.germ1-ain-nilante.com`)"
+      
+      # API domain (authentication required at application level - same as admin/biz)
+      - "traefik.http.routers.api.rule=Host(`api.mekoshi.com`)"
       - "traefik.http.routers.api.entrypoints=websecure"
       - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.api.middlewares=api-headers"
+      
+      # Business dashboard (authentication required at application level)
+      - "traefik.http.routers.business.rule=Host(`biz.mekoshi.com`)"
+      - "traefik.http.routers.business.entrypoints=websecure"
+      - "traefik.http.routers.business.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.business.middlewares=api-headers"
+      
+      # Admin dashboard (authentication required at application level)
+      - "traefik.http.routers.admin.rule=Host(`admin.mekoshi.com`)"
+      - "traefik.http.routers.admin.entrypoints=websecure"
+      - "traefik.http.routers.admin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.admin.middlewares=api-headers"
+      
+      # Shared service and security middleware
       - "traefik.http.services.api.loadbalancer.server.port=8000"
-      # Security headers
       - "traefik.http.middlewares.api-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
       - "traefik.http.middlewares.api-headers.headers.sslredirect=true"
       - "traefik.http.middlewares.api-headers.headers.stsSeconds=31536000"
       - "traefik.http.middlewares.api-headers.headers.stsIncludeSubdomains=true"
-      - "traefik.http.routers.api.middlewares=api-headers"
+
+  # Signal Generator Service
+  signal-generator:
+    build:
+      context: .
+      dockerfile: services/signal-generator/Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-signal-generator
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      API_BASE_URL: http://api:8000
+      QUESTDB_HTTP_URL: ${QUESTDB_HTTP_URL:-http://trading-questdb:9000/exec}
+    ports:
+      - "127.0.0.1:8003:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # Order Execution Service
+  execution:
+    build:
+      context: .
+      dockerfile: services/execution/Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-execution
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:8004:8004"
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # Risk Monitor Service
+  risk-monitor:
+    build:
+      context: .
+      dockerfile: services/risk-monitor/Dockerfile
+    container_name: trading-risk-monitor
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:8005:8005"
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # Strategy Engine Service
+  strategy-engine:
+    build:
+      context: .
+      dockerfile: services/strategy-engine/Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-strategy-engine
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:8006:8006"
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # Backtesting Service
+  backtesting:
+    build:
+      context: .
+      dockerfile: services/backtesting/Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-backtesting
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
+      API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:8007:8007"
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - trading-network
+      - trading-data-external
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # One-shot Alembic migrations runner
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: trading-migrations
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${DB_USER:?DB_USER required}:${DB_PASSWORD:?DB_PASSWORD required}@postgres:5432/${DB_NAME:?DB_NAME required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - trading-network
+    restart: "no"
 
   # Prometheus Monitoring
   prometheus:
@@ -132,13 +725,20 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
-      - ./infrastructure/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/docker/prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
     networks:
       - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:9090/-/healthy || wget -q --spider http://localhost:9090/metrics' "]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   # Grafana Visualization
@@ -158,6 +758,53 @@ services:
       - prometheus
     networks:
       - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/3000' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # Loki - log aggregation
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: trading-loki
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infrastructure/docker/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - /mnt/fastdrive/trading/loki:/loki
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'wget -q --spider http://localhost:3100/ready' "]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Promtail - log forwarder for Docker and host logs
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: trading-promtail
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./infrastructure/docker/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/9080' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
@@ -175,4 +822,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.24.0.0/16
+  trading-data-external:
+    external: true
+    name: ai-trading-system_trading-data

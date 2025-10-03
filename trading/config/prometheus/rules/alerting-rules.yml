@@ -1,0 +1,678 @@
+# ------------------------------------------------------------------------------
+# Prometheus Alert & Recording Rules
+# Notes:
+# - Keep label cardinality low (avoid user IDs, symbols except curated cases)
+# - All alerts must define severity & summary
+# - Use recording rules for derived ratios / expensive expressions
+# - Critical alerts should be actionable with clear runbook hints
+# ------------------------------------------------------------------------------
+groups:
+  - name: recording-burn-rates
+    interval: 30s
+    rules:
+      - record: api:http_error_ratio_5m
+        expr: |
+          sum(rate(app_http_requests_total{service="api",status=~"5.."}[5m]))
+            /
+          sum(rate(app_http_requests_total{service="api"}[5m]))
+      - record: api:http_error_ratio_1h
+        expr: |
+          sum(rate(app_http_requests_total{service="api",status=~"5.."}[1h]))
+            /
+          sum(rate(app_http_requests_total{service="api"}[1h]))
+      - record: api:http_error_burn_rate_fast
+        expr: api:http_error_ratio_5m / 0.01
+      - record: api:http_error_burn_rate_slow
+        expr: api:http_error_ratio_1h / 0.01
+      - record: ingestion:http_error_ratio_5m
+        expr: |
+          sum(rate(app_http_requests_total{service="data-ingestion",status=~"5.."}[5m]))
+            /
+          sum(rate(app_http_requests_total{service="data-ingestion"}[5m]))
+      - record: ingestion:http_error_ratio_1h
+        expr: |
+          sum(rate(app_http_requests_total{service="data-ingestion",status=~"5.."}[1h]))
+            /
+          sum(rate(app_http_requests_total{service="data-ingestion"}[1h]))
+      - record: ingestion:http_error_burn_rate_fast
+        expr: ingestion:http_error_ratio_5m / 0.01
+      - record: ingestion:http_error_burn_rate_slow
+        expr: ingestion:http_error_ratio_1h / 0.01
+  - name: api-slo
+    interval: 30s
+    rules:
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(app_http_requests_total{service="api",status=~"5.."}[5m]))
+            /
+          sum(rate(app_http_requests_total{service="api"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "API 5xx error rate >5% (10m)"
+          description: |-
+            API 5xx error ratio is above 5% for 10m.
+            value={{ $value }}
+      - alert: APIHighErrorRateCritical
+        expr: |
+          sum(rate(app_http_requests_total{service="api",status=~"5.."}[5m]))
+            /
+          sum(rate(app_http_requests_total{service="api"}[5m])) > 0.15
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+            summary: "API 5xx error rate >15% (5m)"
+            description: |-
+              API 5xx error ratio is above 15% for 5m.
+              value={{ $value }}
+      - alert: APILatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(app_http_request_latency_seconds_bucket{service="api"}[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "API p95 latency > 1s (10m)"
+          description: p95 latency exceeded 1s for 10m.
+      - alert: APILatencyP95Critical
+        expr: histogram_quantile(0.95, sum(rate(app_http_request_latency_seconds_bucket{service="api"}[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "API p95 latency > 2s (5m)"
+          description: p95 latency exceeded 2s for 5m.
+      - alert: APIRequestShedding
+        expr: increase(app_requests_shed_total{service="api"}[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "API request shedding detected"
+          description: >-
+            More than 5 requests were shed in the last 10m.
+      - alert: APIConcurrencySaturation
+        expr: |
+          max_over_time(app_http_inflight_requests{service="api"}[5m])
+            /
+          max(app_concurrency_limit{service="api"}) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "API concurrency saturation >90%"
+          description: In-flight requests are above 90% of concurrency limit.
+  - name: ingestion-slo
+    interval: 30s
+    rules:
+      - alert: IngestionHighErrorRate
+        expr: |
+          sum(rate(app_http_requests_total{service="data-ingestion",status=~"5.."}[5m]))
+            /
+          sum(rate(app_http_requests_total{service="data-ingestion"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Ingestion 5xx error rate >5%"
+          description: Ingestion service 5xx error ratio above 5% for 10m.
+      - alert: IngestionRequestShedding
+        expr: increase(app_requests_shed_total{service="data-ingestion"}[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Ingestion request shedding detected"
+          description: >-
+            More than 5 requests were shed in the last 10m.
+      - alert: IngestionHistoricalBackfillStall
+        expr: |
+          (time() - max(historical_backfill_progress_timestamp_seconds)) > 900
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Historical backfill stalled >15m"
+          description: No progress timestamp update for historical backfill >15m.
+      - alert: IngestionHistoricalBackfillStallCritical
+        expr: |
+          (time() - max(historical_backfill_progress_timestamp_seconds)) > 3600
+        for: 5m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Historical backfill stalled >60m"
+          description: No progress timestamp update for historical backfill >60m.
+  - name: pulsar-health
+    interval: 30s
+    rules:
+      - alert: PulsarBrokerPersistenceErrors
+        expr: increase(pulsar_managed_ledger_persist_errors_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: pulsar
+        annotations:
+          summary: "Pulsar persistence errors detected"
+          description: Managed ledger persistence errors occurred in the last 5m.
+      - alert: PulsarBrokerPersistenceErrorsCritical
+        expr: increase(pulsar_managed_ledger_persist_errors_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: critical
+          service: pulsar
+        annotations:
+          summary: "Pulsar persistence error spike"
+          description: >-
+            More than 10 persistence errors occurred in last 5m.
+  - name: ml-governance
+    interval: 30s
+    rules:
+      - alert: MLGovernanceMetricsSilence
+        expr: |
+          (time() - max(app_ml_governance_last_update_timestamp_seconds)) > 900
+        for: 10m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "ML governance metrics silent >15m"
+          description: Last governance metric update exceeded 15m; background jobs may be stalled.
+      - alert: MLGovernanceAutoRollbackSpike
+        expr: increase(app_ml_governance_auto_rollbacks_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "ML auto rollback triggered"
+          description: At least one ML auto rollback occurred in last 10m.
+  - name: auth-security
+    interval: 30s
+    rules:
+      # Remaining lifetime percent for active JWT key (used for dashboards / threshold visualization)
+      - record: auth_key_rotation_remaining_percent
+        expr: (auth_key_rotation_remaining_seconds / (auth_key_rotation_age_seconds + auth_key_rotation_remaining_seconds)) * 100
+      # Password reset / change abuse & failure monitoring (added 2025-09-12)
+      - alert: AuthPasswordResetAbuse
+        expr: rate(auth_password_resets_total{event="request"}[5m]) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Elevated password reset request volume"
+          description: |-
+            Password reset request rate >0.2/s (~60/hour) sustained 10m. Possible enumeration or attack. value={{ $value }}.
+      - alert: AuthPasswordResetAbuseCritical
+        expr: rate(auth_password_resets_total{event="request"}[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "High password reset request volume"
+          description: |-
+            Password reset request rate >0.5/s (~180/hour) sustained 5m. Immediate investigation required. value={{ $value }}.
+      - alert: AuthPasswordResetRateLimitedSpike
+        expr: increase(auth_password_resets_total{event="request_rate_limited"}[10m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Password reset rate limiting spike"
+          description: |-
+            >20 reset requests rate-limited in 10m. Attack or scripted misuse likely.
+      - alert: AuthPasswordResetFailuresSpike
+        expr: increase(auth_password_resets_total{event="reset_failed"}[15m]) > 15
+        for: 5m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Password reset failures elevated"
+          description: |-
+            >15 reset token failures (invalid/expired/policy) in 15m. Possible token brute force or user confusion.
+      - alert: AuthPasswordResetFailuresCritical
+        expr: increase(auth_password_resets_total{event="reset_failed"}[15m]) > 40
+        for: 5m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "Password reset failures surge"
+          description: |-
+            >40 reset failures in 15m. Investigate potential token brute force or systemic delivery issues.
+      - alert: AuthPasswordChangeFailuresSpike
+        expr: increase(auth_password_resets_total{event="change_failed"}[30m]) > 25
+        for: 10m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Password change failures elevated"
+          description: |-
+            >25 change failures (bad current password/policy) in 30m. Possible credential probing by authenticated sessions.
+      - alert: AuthPasswordChangeFailuresCritical
+        expr: increase(auth_password_resets_total{event="change_failed"}[30m]) > 60
+        for: 10m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "Password change failures surge"
+          description: |-
+            >60 change failures in 30m. Immediate review for insider threat or automated attack.
+      - alert: AuthPasswordResetRefreshRevocationsMissing
+        expr: increase(auth_password_resets_total{event="reset_success"}[30m]) > 0 and increase(auth_password_resets_total{event="reset_refresh_revoked"}[30m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Password reset without refresh revocation"
+          description: |-
+            At least one reset success without any corresponding refresh token revocations in 30m. Check Redis or revocation logic.
+      - alert: AuthMFAAdoptionLow
+        expr: auth_mfa_adoption_percent < 60
+        for: 30m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "MFA adoption below 60%"
+          description: |-
+            MFA adoption percent is below 60% for 30m (value={{ $value }}). Improve MFA rollout.
+      - alert: AuthMFAAdoptionCritical
+        expr: auth_mfa_adoption_percent < 40
+        for: 15m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "MFA adoption below 40%"
+          description: |-
+            Severe MFA adoption deficit (value={{ $value }}). Enforce mandatory MFA for privileged users immediately.
+      - alert: AuthKeyRotationNearExpiry
+        expr: auth_key_rotation_remaining_seconds < (auth_key_rotation_age_seconds * 0.25)
+        for: 15m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "JWT key rotation near expiry (<25% remaining)"
+          description: |-
+            Active JWT key has <25% of lifetime remaining; schedule rotation.
+      - alert: AuthKeyRotationCritical
+        expr: auth_key_rotation_remaining_seconds < (auth_key_rotation_age_seconds * 0.10)
+        for: 10m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "JWT key rotation urgent (<10% remaining)"
+          description: |-
+            JWT signing key near end-of-life (value={{ $value }}s remaining). Rotate immediately to avoid forced invalidation.
+      - alert: AuthFailedLoginCountersElevated
+        expr: auth_failed_login_counters > 25
+        for: 10m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Elevated failed login counters"
+          description: |-
+            More than 25 active failed login counters; potential brute force activity.
+      - alert: AuthFailedLoginCountersCritical
+        expr: auth_failed_login_counters > 60
+        for: 10m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "High failed login counters"
+          description: |-
+            Excessive failed login counters (>60). Investigate large-scale brute force or credential stuffing; enable additional rate limiting.
+  - name: streaming
+    interval: 30s
+    rules:
+      # Recording rules for gap seconds and DLQ burn rates
+      - record: stream_topic_gap_seconds
+        expr: time() - stream_last_message_timestamp_seconds
+      - record: stream_dlq_fast_rate
+        expr: sum(increase(stream_dlq_messages_total[5m]))
+      - record: stream_dlq_slow_rate
+        expr: sum(increase(stream_dlq_messages_total[30m])) / 6
+      - alert: StreamMarketLagHigh
+        expr: max_over_time(stream_consumer_lag_seconds{topic="market"}[2m]) > 5
+        for: 3m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Market stream lag >5s"
+          description: Investigate market ingestion / consumer saturation.
+      - alert: StreamMarketLagCritical
+        expr: max_over_time(stream_consumer_lag_seconds{topic="market"}[2m]) > 15
+        for: 2m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "Market stream lag >15s"
+          description: Severe lag; consider throttling producers or restarting consumer.
+      - alert: ProducerPublishSkipsElevated
+        expr: sum by (service) (increase(producer_publish_skipped_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Elevated publish skips"
+          description: Service exceeding adaptive token capacity; check rate config & upstream volume.
+      - alert: ProducerPublishSkipsCritical
+        expr: sum by (service) (increase(producer_publish_skipped_total[5m])) > 250
+        for: 5m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "High publish skip volume"
+          description: Potential sustained overload or misconfigured rate limits.
+      - alert: StreamConsumerSilence
+        expr: sum(increase(stream_messages_processed_total[10m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "Streaming consumer silent 10m"
+          description: No messages processed across topics; check connectivity and broker health.
+      - alert: ProducerCircuitBreakerOpen
+        expr: max_over_time(circuit_breaker_state{breaker="pulsar_producer"}[5m]) == 2
+        for: 5m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "Producer circuit breaker OPEN"
+          description: Producer path blocked >5m; inspect broker errors, network, or credentials.
+      - alert: StreamProcessingErrorsBurst
+        expr: sum(increase(stream_processing_errors_total[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "High stream processing errors"
+          description: Investigate handler exceptions; may indicate schema drift or malformed payloads.
+      - alert: StreamTopicGapFiveMinutes
+        expr: stream_topic_gap_seconds{topic=~"market|social"} > 300
+        for: 2m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Streaming gap >5m"
+          description: No messages >5m on critical topic; inspect producers / Pulsar connectivity.
+      - alert: StreamTopicGapCritical
+        expr: stream_topic_gap_seconds{topic=~"market|social"} > 900
+        for: 2m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "Streaming gap >15m"
+          description: Extended outage; failover or escalate.
+      - alert: StreamDLQSurge
+        expr: increase(stream_dlq_messages_total[10m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "DLQ surge"
+          description: ">50 malformed messages routed to DLQ in 10m; investigate upstream schema drift or corruption."
+      - alert: StreamDLQFastBurn
+        expr: stream_dlq_fast_rate > 20 and stream_dlq_fast_rate > (stream_dlq_slow_rate * 2)
+        for: 2m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "DLQ fast burn spike"
+          description: Fast DLQ rate >20/5m and >2x normalized 30m rate.
+      - alert: StreamDLQPersistentBurn
+        expr: sum(increase(stream_dlq_messages_total[30m])) > 200
+        for: 5m
+        labels:
+          severity: critical
+          service: streaming
+        annotations:
+          summary: "Persistent DLQ burn"
+          description: ">200 malformed/invalid messages in 30m; investigate producer schema drift."
+  - name: synthetic-probes
+    interval: 30s
+    rules:
+      - alert: SyntheticProbeFailure
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: synthetic
+        annotations:
+          summary: "Synthetic probe failed"
+          description: >-
+            Blackbox probe is failing (probe_success=0) for 2m on instance {{ $labels.instance }}.
+      - alert: SyntheticProbeLatencyHigh
+        expr: |
+          avg_over_time(probe_duration_seconds{job="blackbox-http"}[5m]) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          service: synthetic
+        annotations:
+          summary: "Synthetic probe latency >1s (5m avg)"
+          description: >-
+            Average probe duration over 5m exceeded 1 second for {{ $labels.instance }}.
+      - alert: SyntheticProbeLatencyCritical
+        expr: |
+          avg_over_time(probe_duration_seconds{job="blackbox-http"}[5m]) > 2.0
+        for: 3m
+        labels:
+          severity: critical
+          service: synthetic
+        annotations:
+          summary: "Synthetic probe latency >2s"
+          description: >-
+            Critical synthetic latency: 5m average >2s for {{ $labels.instance }}.
+  - name: backfill-completeness
+    interval: 30s
+    rules:
+      # Backfill completeness gauge should be 1 once historical coverage targets met.
+      - alert: HistoricalBackfillIncomplete
+        expr: coverage_backfill_complete == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Historical backfill not yet complete (30m)"
+          description: |-
+            coverage_backfill_complete gauge remained 0 for 30m. Historical data gap persists.
+      - alert: HistoricalBackfillRegression
+        expr: increase(coverage_backfill_complete[10m]) < 0 and coverage_backfill_complete == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Historical backfill regressed to incomplete"
+          description: |-
+            coverage_backfill_complete gauge dropped from 1 to 0. Investigate data retention or accidental deletes.
+      # Force backfill command publish latency (histogram) p95 thresholds
+      - record: force_backfill_publish_latency_p95
+        expr: |
+          histogram_quantile(0.95, sum(rate(force_backfill_publish_latency_seconds_bucket[5m])) by (le))
+      - alert: ForceBackfillPublishLatencyHigh
+        expr: force_backfill_publish_latency_p95 > 2
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Force backfill publish p95 latency >2s"
+          description: p95 latency to publish force backfill command exceeded 2s (10m).
+      - alert: ForceBackfillPublishLatencyCritical
+        expr: force_backfill_publish_latency_p95 > 5
+        for: 5m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Force backfill publish p95 latency >5s"
+          description: p95 latency to publish force backfill command exceeded 5s (5m). Check Pulsar broker or network path.
+  - name: data-lag
+    interval: 30s
+    rules:
+      # Recording rules convert last timestamp gauges to lag seconds (current time - last event time)
+      - record: equities_data_lag_seconds
+        expr: time() - max(equities_last_bar_timestamp_seconds)
+      - record: options_data_lag_seconds
+        expr: time() - max(options_last_bar_timestamp_seconds)
+      - record: news_data_lag_seconds
+        expr: time() - max(news_last_item_timestamp_seconds)
+      - record: social_data_lag_seconds
+        expr: time() - max(social_last_item_timestamp_seconds)
+      # Warning thresholds aligned with ingestion classification (warn: equities/options 5m, news/social 15m)
+      - alert: EquitiesDataLagWarning
+        expr: equities_data_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Equities data lag >5m"
+          description: Equities last bar older than 5m.
+      - alert: EquitiesDataLagCritical
+        expr: equities_data_lag_seconds > 1800
+        for: 5m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Equities data lag >30m"
+          description: Equities last bar older than 30m; investigate ingestion halt or provider outage.
+      - alert: OptionsDataLagWarning
+        expr: options_data_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Options data lag >5m"
+          description: Options last bar older than 5m.
+      - alert: OptionsDataLagCritical
+        expr: options_data_lag_seconds > 1800
+        for: 5m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Options data lag >30m"
+          description: Options last bar older than 30m.
+      - alert: NewsDataLagWarning
+        expr: news_data_lag_seconds > 900
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "News data lag >15m"
+          description: News last item older than 15m.
+      - alert: NewsDataLagCritical
+        expr: news_data_lag_seconds > 3600
+        for: 10m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "News data lag >60m"
+          description: News last item older than 60m.
+      - alert: SocialDataLagWarning
+        expr: social_data_lag_seconds > 900
+        for: 10m
+        labels:
+          severity: warning
+          service: data-ingestion
+        annotations:
+          summary: "Social data lag >15m"
+          description: Social last item older than 15m.
+      - alert: SocialDataLagCritical
+        expr: social_data_lag_seconds > 3600
+        for: 10m
+        labels:
+          severity: critical
+          service: data-ingestion
+        annotations:
+          summary: "Social data lag >60m"
+          description: Social last item older than 60m.
+  - name: drift-severity
+    interval: 30s
+    rules:
+      - alert: ModelDriftMedium
+        expr: model_drift_overall_severity_level >= 2
+        for: 15m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "Model drift severity medium or higher"
+          description: Overall drift severity sustained at medium (>=2) for 15m.
+      - alert: ModelDriftHigh
+        expr: model_drift_overall_severity_level >= 3
+        for: 5m
+        labels:
+          severity: critical
+          service: ml
+        annotations:
+          summary: "Model drift severity high"
+          description: Overall drift severity high (>=3) sustained 5m; consider mitigation or model retraining.
+  - name: forecast-quality
+    interval: 30s
+    rules:
+      - record: forecast_fallback_ratio_5m
+        expr: |
+          sum(increase(forecast_requests_total{status="fallback"}[5m]))
+            /
+          clamp_min(sum(increase(forecast_requests_total[5m])), 1)
+      - alert: ForecastFallbackElevated
+        expr: forecast_fallback_ratio_5m > 0.25 and sum(increase(forecast_requests_total[5m])) > 20
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "Forecast fallback ratio >25% (5m)"
+          description: More than 25% of forecasts using fallback baseline over 5m (volume>20). Investigate model service availability.
+      - alert: ForecastFallbackCritical
+        expr: forecast_fallback_ratio_5m > 0.60 and sum(increase(forecast_requests_total[5m])) > 20
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "Forecast fallback ratio >60% (5m)"
+          description: Severe forecast degradation; majority of requests falling back. Check model serving logs, resource pressure, or dependency outages.

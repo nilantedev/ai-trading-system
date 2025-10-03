@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 from fastapi import WebSocket
 
 from trading_common import get_logger
-from api.auth import verify_access_token, UserRole, user_manager
+from api.auth import verify_access_token, user_manager
 
 logger = get_logger(__name__)
 
@@ -19,7 +19,7 @@ STREAM_POLICY = {
     "signals": {"auth_required": True, "permission": "read:market_data", "role": None},
     "orders": {"auth_required": True, "permission": "write:orders", "role": None},
     "portfolio": {"auth_required": True, "permission": "read:portfolio", "role": None},
-    "system": {"auth_required": True, "permission": None, "role": UserRole.ADMIN},
+    "system": {"auth_required": True, "permission": None, "role": "admin"},
 }
 
 
@@ -53,26 +53,27 @@ async def authenticate_websocket(websocket: WebSocket, stream: str, token: Optio
     # Get user from user manager
     try:
         user_mgmt_user = await user_manager._get_user_by_username(token_data.username)
-        if not user_mgmt_user or user_mgmt_user.status.value != "active":
+        status_val = user_mgmt_user.status.value if hasattr(user_mgmt_user.status, 'value') else getattr(user_mgmt_user, 'status', 'inactive')
+        if not user_mgmt_user or status_val != "active":
             if auth_required:
                 await websocket.close(code=1008, reason="Inactive user")
                 logger.info("WebSocket rejected - inactive user", stream=stream, user=token_data.username)
                 return None
             return None
 
-        user_role = user_mgmt_user.role.value
+        user_role = user_mgmt_user.role.value if hasattr(user_mgmt_user.role, 'value') else str(user_mgmt_user.role)
         permissions = list(user_mgmt_user.permissions)
 
         # Authorization checks
         required_perm = policy.get("permission")
         required_role = policy.get("role")
 
-        if required_perm and required_perm not in permissions and "admin:all" not in permissions:
+        if required_perm and required_perm not in permissions and "admin:all" not in permissions and "admin:*" not in permissions:
             await websocket.close(code=1008, reason="Insufficient permission")
             logger.info("WebSocket rejected - missing permission", stream=stream, required=required_perm, user=token_data.username)
             return None
         
-        if required_role and user_role not in [required_role.value, UserRole.ADMIN.value, UserRole.SUPER_ADMIN.value]:
+        if required_role and user_role not in [required_role, "admin", "super_admin"]:
             await websocket.close(code=1008, reason="Insufficient role")
             logger.info("WebSocket rejected - missing role", stream=stream, required=str(required_role), user=token_data.username)
             return None

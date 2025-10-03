@@ -4,8 +4,19 @@ import os
 from functools import lru_cache
 from typing import Optional, List, Dict, Any
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+
+def get_topic_namespace():
+    """Get Pulsar topic namespace based on environment."""
+    env = os.getenv("ENVIRONMENT", "production")
+    return f"persistent://trading/{env}"
+
+def get_topic(topic_name: str):
+    """Get full topic path for given topic name."""
+    namespace = get_topic_namespace()
+    return f"{namespace}/{topic_name}"
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
@@ -55,19 +66,39 @@ class DatabaseSettings(BaseSettings):
     @field_validator('redis_url', mode='before')
     @classmethod
     def build_redis_url(cls, v, info):
-        """Build Redis URL from components if not provided."""
+        """Initial (pre) construction of Redis URL.
+
+        Order of precedence:
+        1. Explicit env var with prefix (DB_REDIS_URL) supplied -> keep
+        2. Fallback to generic REDIS_URL (no prefix) if present
+        3. Otherwise return placeholder; final adjustment happens in model_validator
+        """
+        # 1. Respect explicitly supplied value that is NOT the baked-in default
         if v and v != "redis://localhost:6379/0":
             return v
-        
-        values = info.data if info else {}
-        host = values.get('redis_host', 'localhost')
-        port = values.get('redis_port', 6379)
-        db = values.get('redis_db', 0)
-        password = values.get('redis_password')
-        
-        if password:
-            return f"redis://:{password}@{host}:{port}/{db}"
-        return f"redis://{host}:{port}/{db}"
+
+        # 2. Generic (non-prefixed) REDIS_URL support for legacy env configs
+        legacy_env = os.getenv("REDIS_URL")
+        if legacy_env:
+            return legacy_env
+
+        # 3. Return default placeholder; we'll compute real URL in post-init validator
+        return v or "redis://localhost:6379/0"
+
+    @model_validator(mode='after')
+    def finalize_redis_url(self):
+        """Finalize redis_url after all dependent fields are populated.
+
+        If redis_url still points to localhost while a different redis_host is configured,
+        rebuild the URL from components. This fixes the limitation that field-level
+        validators (mode='before') don't have access to sibling field values reliably.
+        """
+        if self.redis_url.startswith("redis://localhost") and self.redis_host != "localhost":
+            if self.redis_password:
+                self.redis_url = f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+            else:
+                self.redis_url = f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+        return self
     
     @field_validator('weaviate_url', mode='before')
     @classmethod
@@ -93,19 +124,18 @@ class DatabaseSettings(BaseSettings):
         port = values.get('arangodb_port', 8529)
         return f"http://{host}:{port}"
     
-    class Config:
-        env_prefix = "DB_"
+    # Pydantic v2 configuration
+    model_config = SettingsConfigDict(env_prefix="DB_")
 
 
 class MessageSettings(BaseSettings):
     """Message broker configuration."""
     
-    pulsar_url: str = Field(default="pulsar://localhost:6650")
+    pulsar_url: str = Field(default="pulsar://trading-pulsar:6650")
     pulsar_tenant: str = Field(default="trading")
     pulsar_namespace: str = Field(default="default")
     
-    class Config:
-        env_prefix = "MSG_"
+    model_config = SettingsConfigDict(env_prefix="MSG_")
 
 
 class AISettings(BaseSettings):
@@ -120,8 +150,14 @@ class AISettings(BaseSettings):
     max_batch_size: int = Field(default=16)
     inference_timeout: int = Field(default=30)
     
-    class Config:
-        env_prefix = "AI_"
+    # Pydantic v2 model configuration to allow attribute names that might otherwise
+    # be considered protected (e.g., containing 'model_'). This suppresses the
+    # runtime warnings about protected namespaces while keeping validation intact.
+    # Consolidated Pydantic v2 configuration (cannot mix Config + model_config)
+    model_config = SettingsConfigDict(
+        env_prefix="AI_",
+        protected_namespaces=()
+    )
 
 
 class TradingSettings(BaseSettings):
@@ -143,8 +179,7 @@ class TradingSettings(BaseSettings):
     market_close_hour: int = Field(default=16)
     market_close_minute: int = Field(default=0)
     
-    class Config:
-        env_prefix = "TRADING_"
+    model_config = SettingsConfigDict(env_prefix="TRADING_")
 
 
 class MonitoringSettings(BaseSettings):
@@ -158,8 +193,7 @@ class MonitoringSettings(BaseSettings):
     otel_exporter_endpoint: Optional[str] = Field(default=None)
     otel_service_name: str = Field(default="trading-service")
     
-    class Config:
-        env_prefix = "MONITORING_"
+    model_config = SettingsConfigDict(env_prefix="MONITORING_")
 
 
 class SecuritySettings(BaseSettings):
@@ -182,7 +216,13 @@ class SecuritySettings(BaseSettings):
     rate_limit_burst: int = Field(default=10)
     
     # Trusted hosts
-    trusted_hosts: List[str] = Field(default=["localhost", "127.0.0.1"])
+    # Internal DNS hostnames (Docker compose service names) plus loopback
+    trusted_hosts: List[str] = Field(default_factory=lambda: [
+        "localhost", "127.0.0.1",
+        "trading-api", "trading-ml", "trading-data-ingestion", "trading-signal-generator",
+        "trading-execution", "trading-risk-monitor", "trading-strategy-engine", "trading-backtesting",
+        "trading-postgres", "trading-redis", "trading-questdb", "trading-weaviate", "trading-prometheus"
+    ])
     
     @field_validator('cors_origins', mode='before')
     @classmethod
@@ -198,8 +238,7 @@ class SecuritySettings(BaseSettings):
             return [host.strip() for host in v.split(',')]
         return v
     
-    class Config:
-        env_prefix = "SECURITY_"
+    model_config = SettingsConfigDict(env_prefix="SECURITY_")
 
 
 class Settings(BaseSettings):
@@ -303,12 +342,14 @@ class Settings(BaseSettings):
             for warning in warnings:
                 logger.warning(warning)
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-        validate_assignment = True
-        extra = "ignore"  # Allow extra environment variables
+    # Global settings model configuration
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        validate_assignment=True,
+        extra="ignore"
+    )
 
 
 @lru_cache()

@@ -6,15 +6,27 @@ Provides comprehensive monitoring and observability metrics.
 
 import time
 import logging
+import os
 from typing import Optional, Dict, Any
 from fastapi import Request, Response
 from prometheus_client import (
-    Counter, Histogram, Gauge, Info, 
+    Counter, Histogram, Gauge, Info,
     CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST,
-    multiprocess, values
+    multiprocess
 )
-import os
+try:  # Prefer shared canonical app_* metrics if observability module present
+    from observability import (
+        HTTP_REQUESTS as APP_HTTP_REQUESTS,
+        HTTP_LATENCY as APP_HTTP_LATENCY,
+        INFLIGHT as APP_HTTP_INFLIGHT,
+        CONCURRENCY_LIMIT as APP_CONCURRENCY_LIMIT,
+        QUEUE_DEPTH as APP_QUEUE_DEPTH,
+    )  # type: ignore
+    _HAS_SHARED_APP_METRICS = True
+except Exception:  # noqa: BLE001 - Fallback to local only (will add aliases)
+    _HAS_SHARED_APP_METRICS = False
 import asyncio
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +38,15 @@ else:
     registry = None
 
 
-# HTTP Request Metrics
+"""Local metrics + canonical app_* exposure.
+
+If the shared observability module (shared/python-common/observability.py) is available,
+we rely on those canonical metrics (app_http_requests_total, etc.). If not (API running
+standalone or path import issue) we create lightweight alias metrics with canonical names
+so the health script sees them, emitting zero-valued gauges where meaningful.
+"""
+
+# Primary (service-local) HTTP metrics remain for backward compatibility / legacy dashboards
 http_requests_total = Counter(
     'http_requests_total',
     'Total number of HTTP requests',
@@ -41,6 +61,46 @@ http_request_duration_seconds = Histogram(
     buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
     registry=registry
 )
+
+# Canonical app_* metrics (aliases or standalone fallbacks)
+if not _HAS_SHARED_APP_METRICS:
+    # Define minimal canonical metrics so health check stops warning
+    APP_HTTP_REQUESTS = Counter(
+        'app_http_requests_total',
+        'Canonical total HTTP requests (fallback local definition)',
+        ['service', 'method', 'path', 'status'],
+        registry=registry
+    )
+    APP_HTTP_LATENCY = Histogram(
+        'app_http_request_latency_seconds',
+        'Canonical HTTP request latency (fallback local definition)',
+        ['service', 'method', 'path'],
+        buckets=[0.005,0.01,0.02,0.05,0.1,0.25,0.5,1,2,5],
+        registry=registry
+    )
+    APP_HTTP_INFLIGHT = Gauge(
+        'app_http_inflight_requests',
+        'In-flight HTTP requests (fallback local definition)',
+        ['service'],
+        registry=registry
+    )
+    APP_CONCURRENCY_LIMIT = Gauge(
+        'app_concurrency_limit',
+        'Configured concurrency limit (fallback local definition)',
+        ['service'],
+        registry=registry
+    )
+    APP_QUEUE_DEPTH = Gauge(
+        'app_request_queue_depth',
+        'Queued requests awaiting concurrency slot (fallback local definition)',
+        ['service'],
+        registry=registry
+    )
+else:
+    # Map to names used later for uniform access
+    APP_HTTP_INFLIGHT = APP_HTTP_INFLIGHT  # type: ignore
+    APP_CONCURRENCY_LIMIT = APP_CONCURRENCY_LIMIT  # type: ignore
+    APP_QUEUE_DEPTH = APP_QUEUE_DEPTH  # type: ignore
 
 http_request_size_bytes = Histogram(
     'http_request_size_bytes',
@@ -290,6 +350,71 @@ background_task_duration_seconds = Histogram(
     registry=registry
 )
 
+# Historical coverage gauges (populated by admin verification endpoints)
+historical_dataset_coverage_ratio = Gauge(
+    'historical_dataset_coverage_ratio',
+    'Approx distinct trading day coverage ratio relative to target horizon (per dataset)',
+    ['dataset'],
+    registry=registry
+)
+historical_dataset_row_count = Gauge(
+    'historical_dataset_row_count',
+    'Row count per historical dataset',
+    ['dataset'],
+    registry=registry
+)
+historical_dataset_last_timestamp_seconds = Gauge(
+    'historical_dataset_last_timestamp_seconds',
+    'Last observed timestamp (epoch seconds) per dataset',
+    ['dataset'],
+    registry=registry
+)
+historical_dataset_span_days = Gauge(
+    'historical_dataset_span_days',
+    'Span in days between first and last timestamp per dataset',
+    ['dataset'],
+    registry=registry
+)
+
+
+CANONICAL_FLAG = os.getenv('ENABLE_METRICS_CANONICAL_NAMES', '0') in ('1', 'true', 'True', 'YES', 'yes')
+
+# Helper wrappers for dual-publish
+def _dual_counter(primary: Counter, canonical_name: str, documentation: str, labelnames: tuple):
+    if not CANONICAL_FLAG:
+        return primary, None
+    canonical = Counter(canonical_name, documentation + ' (canonical alias)', labelnames, registry=registry)
+    return primary, canonical
+
+def _dual_histogram(primary: Histogram, canonical_name: str, documentation: str, labelnames: tuple, **kwargs):
+    if not CANONICAL_FLAG:
+        return primary, None
+    buckets = kwargs.get('buckets') or primary._upper_bounds  # reuse
+    canonical = Histogram(canonical_name, documentation + ' (canonical alias)', labelnames, buckets=buckets, registry=registry)
+    return primary, canonical
+
+def _observe(counter_pair, labels: Dict[str, str], value=None, histogram=False):
+    primary, alias = counter_pair
+    if histogram:
+        primary.labels(**labels).observe(value)
+        if alias:
+            alias.labels(**labels).observe(value)
+    else:
+        primary.labels(**labels).inc(value if value is not None else 1)
+        if alias:
+            alias.labels(**labels).inc(value if value is not None else 1)
+
+# Keep original metric objects (already defined above) and add canonical alias pairs
+try:
+    http_requests_pair = (http_requests_total, None)
+    http_duration_pair = (http_request_duration_seconds, None)
+    if CANONICAL_FLAG:
+        # Define canonical alias metrics (prefixed variants)
+        http_requests_pair = _dual_counter(http_requests_total, 'api_http_requests_total', 'Total number of HTTP requests', ('method','endpoint','status_code'))
+        http_duration_pair = _dual_histogram(http_request_duration_seconds, 'api_http_request_duration_seconds', 'HTTP request duration in seconds', ('method','endpoint'))
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Canonical metrics setup issue: {e}")
+
 
 class MetricsCollector:
     """Metrics collection and management."""
@@ -310,18 +435,20 @@ class MetricsCollector:
         method = request.method
         endpoint = self._get_endpoint_label(request.url.path)
         status_code = str(response.status_code)
-        
-        # Record basic metrics
-        http_requests_total.labels(
-            method=method,
-            endpoint=endpoint, 
-            status_code=status_code
-        ).inc()
-        
-        http_request_duration_seconds.labels(
-            method=method,
-            endpoint=endpoint
-        ).observe(duration)
+        # Primary + alias counter
+        _observe(http_requests_pair, {'method': method, 'endpoint': endpoint, 'status_code': status_code})
+        # Also emit canonical app_* metrics (service label = api) ensuring low cardinality path label
+        try:
+            path_label = endpoint  # Already normalized above
+            APP_HTTP_REQUESTS.labels(service='api', method=method, path=path_label, status=status_code).inc()  # type: ignore[arg-type]
+            APP_HTTP_LATENCY.labels(service='api', method=method, path=path_label).observe(duration)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            pass
+        # Primary + alias histogram
+        primary, alias = http_duration_pair
+        primary.labels(method=method, endpoint=endpoint).observe(duration)
+        if alias:
+            alias.labels(method=method, endpoint=endpoint).observe(duration)
         
         # Record request size (avoid using protected _body attribute)
         try:
@@ -442,15 +569,16 @@ class MetricsCollector:
     def record_external_api_request(self, provider: str, endpoint: str, duration: float, success: bool):
         """Record external API request."""
         status = 'success' if success else 'error'
+        prov_label = self._normalize_provider(provider)
+        ep_label = self._normalize_endpoint(endpoint)
         external_api_requests_total.labels(
-            provider=provider,
-            endpoint=endpoint,
+            provider=prov_label,
+            endpoint=ep_label,
             status=status
         ).inc()
-        
         external_api_duration_seconds.labels(
-            provider=provider,
-            endpoint=endpoint
+            provider=prov_label,
+            endpoint=ep_label
         ).observe(duration)
     
     def record_cache_operation(self, operation: str, hit: bool):
@@ -494,6 +622,83 @@ class MetricsCollector:
             return path
         
         return '/other'
+
+    def _normalize_provider(self, provider: str) -> str:
+        """Normalize provider label to a small, stable set to reduce cardinality.
+        Accepts a provider key or URL; returns lowercase provider key.
+        """
+        try:
+            if not provider:
+                return 'unknown'
+            p = provider.strip().lower()
+            # If a URL/domain was passed, extract netloc base
+            if p.startswith('http://') or p.startswith('https://'):
+                netloc = urlparse(p).netloc
+                p = netloc.split(':')[0]
+            # Map common domains to canonical providers
+            if 'alpaca' in p:
+                return 'alpaca'
+            if 'polygon' in p:
+                return 'polygon'
+            if 'newsapi' in p or 'newsapi.org' in p:
+                return 'newsapi'
+            if 'eodhd' in p:
+                return 'eodhd'
+            if 'reddit' in p:
+                return 'reddit'
+            if 'twitter' in p or 'x.com' in p:
+                return 'twitter'
+            return p
+        except Exception:
+            return 'unknown'
+
+    def _normalize_endpoint(self, endpoint: str) -> str:
+        """Normalize endpoint path to limit label cardinality.
+        - Strip query strings and fragments
+        - Keep only the first 2-3 path segments
+        - Replace numeric/date-like segments with tokens (:id)
+        - Truncate overly long labels
+        """
+        try:
+            if not endpoint:
+                return '/'
+            # If a full URL, parse and use the path; otherwise treat as path
+            path = endpoint
+            if endpoint.startswith('http://') or endpoint.startswith('https://'):
+                path = urlparse(endpoint).path or '/'
+            # Split and keep a few leading segments
+            segs = [s for s in path.split('/') if s]
+            norm = []
+            for s in segs[:3]:
+                # Replace numeric or UUID-like segments
+                if s.isdigit() or _looks_like_uuid(s) or _looks_like_date(s):
+                    norm.append(':id')
+                else:
+                    # Shorten very long slugs to prevent explosion
+                    norm.append(s[:24])
+            label = '/' + '/'.join(norm)
+            # Final guard: cap to 64 chars
+            if len(label) > 64:
+                label = label[:61] + '...'
+            return label if label else '/'
+        except Exception:
+            return '/'
+
+
+def _looks_like_uuid(s: str) -> bool:
+    if len(s) in (32, 36):
+        hexchars = s.replace('-', '')
+        return all(c in '0123456789abcdefABCDEF' for c in hexchars)
+    return False
+
+
+def _looks_like_date(s: str) -> bool:
+    # Basic patterns: YYYY, YYYYMMDD, YYYY-MM-DD
+    if len(s) == 10 and s[4] == '-' and s[7] == '-' and s[:4].isdigit() and s[5:7].isdigit() and s[8:].isdigit():
+        return True
+    if len(s) == 8 and s.isdigit():
+        return True
+    return False
 
 
 # Global metrics collector
@@ -560,3 +765,11 @@ def get_metrics_handler():
 
 # Export metrics instance for use in other modules
 __all__ = ['metrics', 'create_metrics_middleware', 'get_metrics_handler']
+
+# Export coverage gauges explicitly for importers
+__all__ += [
+    'historical_dataset_coverage_ratio',
+    'historical_dataset_row_count',
+    'historical_dataset_last_timestamp_seconds',
+    'historical_dataset_span_days'
+]

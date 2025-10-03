@@ -17,6 +17,10 @@ import statistics
 from sklearn.mixture import GaussianMixture
 from scipy import stats
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 
@@ -575,6 +579,15 @@ class MarketRegimeDetector:
             'regime_accuracy': self.regime_accuracy,
             'model_features': len(self.hmm_model.feature_history),
             'days_since_regime_change': (datetime.utcnow() - self.regime_change_timestamp).days
+        }
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get regime detector status (sync wrapper for compatibility)."""
+        return {
+            'current_regime': self.current_regime.value,
+            'regime_confidence': self.regime_confidence,
+            'regime_changes_detected': self.regime_changes_detected,
+            'initialized': self.cache is not None
         }
 
 

@@ -14,7 +14,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from api.websocket_manager import connection_manager, websocket_streamer
+from api.websocket_manager import connection_manager
 from api.websocket_auth import authenticate_websocket
 from trading_common import get_logger
 

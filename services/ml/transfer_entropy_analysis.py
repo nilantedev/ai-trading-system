@@ -27,6 +27,10 @@ import networkx as nx
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 

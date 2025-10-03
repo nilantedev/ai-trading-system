@@ -39,10 +39,12 @@ from typing import List, Dict, Any, Optional, Tuple
 import os
 from time import perf_counter
 
-try:  # pragma: no cover - runtime import guarded for offline tests
-    import weaviate  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover
-    weaviate = None  # type: ignore
+try:
+    import weaviate
+    from weaviate.auth import AuthApiKey
+    from weaviate.config import Config
+except ImportError:
+    weaviate = None
 
 
 class WeaviateSchemaError(RuntimeError):
@@ -51,7 +53,12 @@ class WeaviateSchemaError(RuntimeError):
 
 @dataclass(frozen=True)
 class WeaviateConfig:
-    url: str = os.getenv("DB_WEAVIATE_URL", "http://localhost:8080")
+    # Prefer service-level WEAVIATE_URL when present; fall back to legacy DB_WEAVIATE_URL, then sane default
+    url: str = (
+        os.getenv("WEAVIATE_URL")
+        or os.getenv("DB_WEAVIATE_URL")
+        or "http://weaviate:8080"
+    )
     api_key: Optional[str] = os.getenv("WEAVIATE_API_KEY")
     timeout: int = int(os.getenv("WEAVIATE_TIMEOUT_SECONDS", "15"))
 
@@ -61,22 +68,66 @@ class WeaviateConfig:
 
 
 @lru_cache(maxsize=1)
-def get_weaviate_client(cfg: Optional[WeaviateConfig] = None):  # pragma: no cover - network path not tested
-    """Return a cached Weaviate client instance.
-    In scaffold stage we avoid raising if library missing until actually used.
+def get_weaviate_client(cfg: Optional[WeaviateConfig] = None):
+    """Return a cached Weaviate v4 client instance with safe auth fallback.
+
+    Behavior:
+    - If WEAVIATE_API_KEY is provided, first attempt authenticated connection.
+    - On auth-related failures (401 / OIDC not configured), retry without auth
+      to support clusters with anonymous access enabled.
     """
     if weaviate is None:
         raise WeaviateSchemaError("weaviate-client not installed or failed to import")
+
     cfg = cfg or WeaviateConfig()
     cfg.validate()
-    auth_config = None
+
+    # Extract host and port from URL
+    from urllib.parse import urlparse
+    parsed = urlparse(cfg.url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 8080
+
+    # Build an authenticated client first (if api_key present)
+    def _connect(auth):
+        return weaviate.connect_to_local(
+            host=host,
+            port=port,
+            auth_credentials=auth,
+            skip_init_checks=True,
+        )
+
+    last_err: Optional[Exception] = None
+    # Try with API key if provided
     if cfg.api_key:
         try:
-            from weaviate.auth import AuthApiKey  # type: ignore[import-not-found]
-            auth_config = AuthApiKey(api_key=cfg.api_key)
-        except ImportError:  # pragma: no cover
-            auth_config = None
-    return weaviate.Client(url=cfg.url, auth_client_secret=auth_config, timeout_config=(cfg.timeout, cfg.timeout))  # type: ignore
+            client = _connect(AuthApiKey(api_key=cfg.api_key))
+            # Touch meta to validate auth where possible
+            try:
+                _ = client.cluster.get_nodes()  # cheap call; raises on auth issues in many setups
+            except Exception:
+                pass
+            return client
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            msg = str(e)
+            # Known case: server has no OIDC/API key configured -> 401 with OIDC hint
+            if "oidc auth is not configured" in msg.lower() or "401" in msg or "unauthorized" in msg.lower():
+                # fall through to anonymous retry
+                pass
+            else:
+                # Not an auth issue; propagate
+                raise
+
+    # Retry without auth (anonymous access)
+    try:
+        client = _connect(None)
+        return client
+    except Exception as e:  # noqa: BLE001
+        # If we had an earlier auth error, surface that for operator clarity
+        if last_err is not None:
+            raise WeaviateSchemaError(f"Authenticated connect failed and anonymous retry failed: auth_error={last_err}; anon_error={e}")
+        raise WeaviateSchemaError(str(e))
 
 
 def desired_schema() -> List[Dict[str, Any]]:
@@ -95,7 +146,50 @@ def desired_schema() -> List[Dict[str, Any]]:
                 {"name": "published_at", "dataType": ["date"], "description": "Publication timestamp"},
                 {"name": "tickers", "dataType": ["text[]"], "description": "Related symbols"},
             ],
-        }
+        },
+        {
+            "class": "SocialSentiment",
+            "description": "Aggregated social sentiment observation per symbol & platform",
+            "vectorizer": "text2vec-transformers",
+            "properties": [
+                {"name": "symbol", "dataType": ["text"], "description": "Underlying symbol"},
+                {"name": "platform", "dataType": ["text"], "description": "Source platform (reddit/twitter/stocktwits)"},
+                {"name": "sentiment", "dataType": ["text"], "description": "Serialized numeric sentiment score"},
+                {"name": "momentum", "dataType": ["text"], "description": "Serialized momentum score"},
+                {"name": "topics", "dataType": ["text[]"], "description": "Key discussion topics"},
+                {"name": "timestamp", "dataType": ["date"], "description": "Observation timestamp"},
+                {"name": "influential_mentions", "dataType": ["text"], "description": "Influential mention count (stringified)"},
+                {"name": "confidence", "dataType": ["text"], "description": "Confidence score (stringified)"},
+            ],
+        },
+        {
+            "class": "OptionContract",
+            "description": "Daily aggregate / metadata for an option contract",
+            "vectorizer": "none",
+            "properties": [
+                {"name": "underlying", "dataType": ["text"], "description": "Underlying symbol"},
+                {"name": "option_symbol", "dataType": ["text"], "description": "Full option ticker (e.g. O:XYZ... )"},
+                {"name": "expiry", "dataType": ["date"], "description": "Expiration date"},
+                {"name": "right", "dataType": ["text"], "description": "Call or Put"},
+                {"name": "strike", "dataType": ["text"], "description": "Strike price (stringified)"},
+                {"name": "implied_vol", "dataType": ["text"], "description": "Implied volatility (stringified)"},
+                {"name": "timestamp", "dataType": ["date"], "description": "Observation timestamp (bar date)"},
+            ],
+        },
+        {
+            "class": "EquityBar",
+            "description": "Daily equity OHLCV bar snapshot for vector augmentation",
+            "vectorizer": "none",
+            "properties": [
+                {"name": "symbol", "dataType": ["text"], "description": "Equity symbol"},
+                {"name": "timestamp", "dataType": ["date"], "description": "Bar date"},
+                {"name": "open", "dataType": ["text"], "description": "Open price (stringified)"},
+                {"name": "high", "dataType": ["text"], "description": "High price (stringified)"},
+                {"name": "low", "dataType": ["text"], "description": "Low price (stringified)"},
+                {"name": "close", "dataType": ["text"], "description": "Close price (stringified)"},
+                {"name": "volume", "dataType": ["text"], "description": "Volume (stringified)"},
+            ],
+        },
     ]
 
 
@@ -150,24 +244,94 @@ def diff_schema(current: List[Dict[str, Any]], desired: List[Dict[str, Any]]) ->
     }
 
 
-def fetch_current_schema(client) -> List[Dict[str, Any]]:  # pragma: no cover - network
-    schema = client.schema.get()
-    return schema.get("classes", []) if isinstance(schema, dict) else []
+def fetch_current_schema(client) -> List[Dict[str, Any]]:
+    """Fetch current schema using v4 client."""
+    try:
+        collections = client.collections.list_all()
+        classes = []
+        for name in collections:
+            collection = client.collections.get(name)
+            config = collection.config.get()
+            class_spec = {
+                "class": name,
+                "description": config.description if hasattr(config, 'description') else "",
+                "properties": []
+            }
+            if hasattr(config, 'properties'):
+                for prop in config.properties:
+                    class_spec["properties"].append({
+                        "name": prop.name,
+                        "dataType": [prop.data_type],
+                        "description": prop.description if hasattr(prop, 'description') else ""
+                    })
+            classes.append(class_spec)
+        return classes
+    except Exception:
+        return []
 
 
-def apply_schema_changes(diff: Dict[str, Any], client) -> Dict[str, Any]:  # pragma: no cover - network
-    """Apply additive schema changes ONLY (no destructive operations)."""
+def apply_schema_changes(diff: Dict[str, Any], client) -> Dict[str, Any]:
+    """Apply schema changes using v4 client."""
     applied = {"classes_created": 0, "properties_added": 0}
     start = perf_counter()
+    
     for cls in diff.get("add_classes", []):
-        client.schema.create_class(cls)
-        applied["classes_created"] += 1
-    for cls_name, props in diff.get("add_properties", {}).items():
-        for p in props:
-            client.schema.add_property(cls_name, p)
-            applied["properties_added"] += 1
+        try:
+            # Map old dataType format to v4 DataType
+            properties = []
+            for p in cls.get("properties", []):
+                data_type = p["dataType"][0]
+                # Map broader set of simple types; fallback to TEXT
+                if data_type == "text":
+                    wv_data_type = weaviate.classes.config.DataType.TEXT
+                elif data_type == "text[]":
+                    wv_data_type = weaviate.classes.config.DataType.TEXT_ARRAY
+                elif data_type == "date":
+                    wv_data_type = weaviate.classes.config.DataType.DATE
+                elif data_type in ("number", "float", "int"):
+                    # We store numbers as TEXT in this scaffold (stringified); true numeric support can be added later.
+                    wv_data_type = weaviate.classes.config.DataType.TEXT
+                else:
+                    wv_data_type = weaviate.classes.config.DataType.TEXT
+                
+                properties.append(
+                    weaviate.classes.config.Property(
+                        name=p["name"],
+                        data_type=wv_data_type,
+                        description=p.get("description", "")
+                    )
+                )
+            
+            client.collections.create(
+                name=cls["class"],
+                description=cls.get("description", ""),
+                properties=properties
+            )
+            applied["classes_created"] += 1
+        except Exception as e:
+            print(f"Error creating class {cls['class']}: {e}")
+    
     _record_vector_metric('schema_apply', 'success', start)
     return applied
+
+
+def ensure_desired_schema(client) -> Dict[str, Any]:
+    """Idempotently ensure desired schema is applied.
+
+    Returns a dict summarizing actions taken (same shape as apply_schema_changes output + diff keys).
+    Swallows errors (returns empty) if client not available. Intended for best-effort startup / fallback flows.
+    """
+    try:  # pragma: no cover
+        current = fetch_current_schema(client)
+        desired = desired_schema()
+        diff = diff_schema(current, desired)
+        # Fast path: nothing to add
+        if not diff['add_classes'] and not diff['add_properties']:
+            return {"changed": False, **diff}
+        applied = apply_schema_changes(diff, client)
+        return {"changed": True, **diff, **applied}
+    except Exception:
+        return {"changed": False, "error": True}
 
 
 def _record_vector_metric(operation: str, status: str, start_time: float) -> None:
@@ -187,4 +351,5 @@ __all__ = [
     "diff_schema",
     "fetch_current_schema",
     "apply_schema_changes",
+    "ensure_desired_schema",
 ]

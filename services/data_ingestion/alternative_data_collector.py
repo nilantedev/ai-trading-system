@@ -13,8 +13,23 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 import os
+from contextlib import asynccontextmanager
+
+# Optional Prometheus metrics (best-effort; continue if not available)
+try:  # noqa: SIM105
+    from prometheus_client import Counter  # type: ignore
+except Exception:  # noqa: BLE001
+    Counter = None  # type: ignore
+
+# Optional QuestDB sender
+try:
+    from questdb.ingress import Sender, TimestampNanos  # type: ignore
+except Exception:  # noqa: BLE001
+    Sender = None  # type: ignore
+    TimestampNanos = None  # type: ignore
 
 from trading_common import get_logger, get_settings
+from trading_common.messaging import get_pulsar_client
 from trading_common.cache import get_trading_cache
 
 logger = get_logger(__name__)
@@ -91,6 +106,8 @@ class SocialSentiment:
     influential_mentions: int  # Mentions by high-follower accounts
     timestamp: datetime
     confidence: float       # 0-1, reliability of sentiment
+    # value_score will be computed dynamically (not part of incoming model creation) and added before persistence
+    # We don't store it as a dataclass field to avoid breaking existing instantiations; handled via setattr.
 
 
 @dataclass
@@ -112,6 +129,27 @@ class AlternativeDataCollector:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
         self.cache = None
+        # Messaging / streaming (mirrors news service lightweight pattern)
+        self.pulsar_client = None
+        self.producer = None
+        self._pulsar_topic = 'persistent://trading/production/social-sentiment'
+        # Internal lightweight resilience primitives for producer path
+        self._pulsar_error_tokens = 15
+        self._pulsar_error_last_refill = datetime.utcnow()
+        try:
+            # Reuse existing global counter name for consistency if already registered elsewhere
+            from prometheus_client import Counter as _PC  # type: ignore
+            try:
+                self._pulsar_error_counter = _PC('pulsar_persistence_errors_total', 'Total Pulsar persistence or producer send errors')
+            except Exception:  # noqa: BLE001
+                self._pulsar_error_counter = None
+        except Exception:  # noqa: BLE001
+            self._pulsar_error_counter = None
+        # Simple adaptive token bucket (looser than news; social sentiment volume moderate)
+        self._bucket_rate = 40.0
+        self._bucket_capacity = 120.0
+        self._bucket_tokens = self._bucket_capacity
+        self._bucket_last = datetime.utcnow()
         
         # API configurations (add your API keys to environment)
         self.unusual_whales_key = os.getenv('UNUSUAL_WHALES_API_KEY')
@@ -122,6 +160,37 @@ class AlternativeDataCollector:
         # Performance tracking
         self.data_points_collected = 0
         self.high_value_signals = 0
+        # Feature flags for multi-sink persistence
+        self.enable_questdb_persist = os.getenv('ENABLE_QUESTDB_SOCIAL_PERSIST', os.getenv('ENABLE_QUESTDB_HIST_PERSIST','false')).lower() in ('1','true','yes')
+        self.enable_postgres_persist = os.getenv('ENABLE_POSTGRES_SOCIAL_PERSIST','false').lower() in ('1','true','yes')
+        self.enable_hist_dry_run = os.getenv('ENABLE_HIST_DRY_RUN','false').lower() in ('1','true','yes')
+        self.enable_weaviate_persist = os.getenv('ENABLE_WEAVIATE_PERSIST','false').lower() in ('1','true','yes')
+        self.ml_service_url = os.getenv('ML_SERVICE_URL', 'http://trading-ml:8001')
+        # QuestDB configuration (align with market_data_service pattern)
+        self.questdb_conf: Optional[str] = None
+        if self.enable_questdb_persist and Sender:
+            try:
+                host = os.getenv('QUESTDB_HOST', 'trading-questdb')
+                proto = os.getenv('QUESTDB_INGEST_PROTOCOL','tcp').lower().strip()
+                if proto not in ('tcp','http'):
+                    proto = 'tcp'
+                if proto == 'tcp':
+                    port = int(os.getenv('QUESTDB_LINE_TCP_PORT','9009'))
+                    self.questdb_conf = f"tcp::addr={host}:{port};"
+                else:
+                    http_port = int(os.getenv('QUESTDB_HTTP_PORT','9000'))
+                    self.questdb_conf = f"http::addr={host}:{http_port};"
+            except Exception:
+                self.questdb_conf = None
+        # Metrics registry (local dict to avoid duplicate registration)
+        self.prom_metrics: Dict[str, Any] = {}
+        self._register_metrics()
+        # Ingestion-time filtering threshold separate from retention pruning floor.
+        try:
+            self._social_ingest_value_min = float(os.getenv('SOCIAL_INGEST_VALUE_MIN','0.0'))
+        except Exception:
+            self._social_ingest_value_min = 0.0
+        self._social_ingest_filter_metrics_ready = False
         
     async def initialize(self):
         """Initialize alternative data collector."""
@@ -131,11 +200,31 @@ class AlternativeDataCollector:
         )
         self.cache = get_trading_cache()
         logger.info("Alternative Data Collector initialized")
+        # Initialize Pulsar producer (best-effort, never raise)
+        try:
+            self.pulsar_client = get_pulsar_client()
+            self.producer = self.pulsar_client.create_producer(
+                topic=self._pulsar_topic,
+                producer_name='alternative-data-collector'
+            )
+            logger.info("AlternativeDataCollector Pulsar producer connected topic=%s", self._pulsar_topic)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AlternativeDataCollector Pulsar init failed: %s", e)
     
     async def close(self):
         """Close the alternative data collector."""
         if self.session:
             await self.session.close()
+        try:
+            if self.producer:
+                self.producer.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self.pulsar_client:
+                self.pulsar_client.close()
+        except Exception:  # noqa: BLE001
+            pass
     
     async def get_options_flow(self, symbol: str, lookback_hours: int = 4) -> List[OptionsFlow]:
         """
@@ -284,16 +373,77 @@ class AlternativeDataCollector:
         
         Reddit, Twitter, StockTwits sentiment can predict short-term moves.
         """
-        sentiment_data = []
-        
-        # Get sentiment from multiple platforms
+        sentiment_data: List[SocialSentiment] = []
+
         platforms = ['reddit', 'twitter', 'stocktwits']
-        
         for platform in platforms:
-            sentiment = await self._get_platform_sentiment(symbol, platform)
-            if sentiment:
-                sentiment_data.append(sentiment)
-        
+            try:
+                sentiment = await self._get_platform_sentiment(symbol, platform)
+                if sentiment:
+                    sentiment_data.append(sentiment)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("social.sentiment.platform_failed symbol=%s platform=%s err=%s", symbol, platform, e)
+
+        # Multi-sink persistence (best-effort, never raise)
+        if sentiment_data:
+            # Compute value_score for each row (heuristic) before persistence
+            for r in sentiment_data:
+                try:
+                    setattr(r, 'value_score', self._compute_social_value_score(r))
+                except Exception:
+                    setattr(r, 'value_score', 0.0)
+            # Lazy metrics registration for ingest filtering
+            if not self._social_ingest_filter_metrics_ready:
+                try:
+                    from prometheus_client import Counter as _PC  # type: ignore
+                    try:
+                        self.prom_metrics['social_ingest_filtered_total'] = _PC('social_ingest_filtered_total','Social sentiment rows dropped at ingestion',['reason'])
+                    except Exception:
+                        self.prom_metrics['social_ingest_filtered_total'] = None
+                    try:
+                        self.prom_metrics['social_ingest_kept_total'] = _PC('social_ingest_kept_total','Social sentiment rows kept after ingestion filters')
+                    except Exception:
+                        self.prom_metrics['social_ingest_kept_total'] = None
+                except Exception:
+                    self.prom_metrics['social_ingest_filtered_total'] = None
+                    self.prom_metrics['social_ingest_kept_total'] = None
+                self._social_ingest_filter_metrics_ready = True
+            # Apply ingestion-time filter
+            filtered_rows: List[Any] = []
+            filtered_ct = 0
+            for r in sentiment_data:
+                try:
+                    if float(getattr(r,'value_score',0.0)) < self._social_ingest_value_min:
+                        filtered_ct += 1
+                        ctr = self.prom_metrics.get('social_ingest_filtered_total')
+                        if ctr:
+                            try: ctr.labels(reason='value_score').inc()
+                            except Exception: pass
+                        continue
+                except Exception:
+                    pass
+                filtered_rows.append(r)
+            if filtered_ct and getattr(logger,'info',None):
+                try:
+                    logger.info("social_ingest_filter", extra={"event":"social_ingest_filter","filtered":filtered_ct,"kept":len(filtered_rows),"value_min":self._social_ingest_value_min})
+                except Exception:
+                    pass
+            if filtered_rows and self.prom_metrics.get('social_ingest_kept_total'):
+                try: self.prom_metrics['social_ingest_kept_total'].inc(len(filtered_rows))
+                except Exception: pass
+            sentiment_data = filtered_rows
+            await self._persist_social_sentiment(sentiment_data)
+            # Optional vector indexing (aggregate items) best-effort
+            if self.enable_weaviate_persist:
+                try:
+                    await self._index_social_to_weaviate(sentiment_data)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("social.weaviate.index_failed symbol=%s err=%s", symbol, e)
+            # Publish to streaming topic (best-effort)
+            try:
+                await self._publish_social_sentiment(sentiment_data)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("social.publish.failed symbol=%s err=%s", symbol, e)
         return sentiment_data
     
     async def get_dark_pool_activity(self, symbol: str) -> Optional[DarkPoolActivity]:
@@ -475,6 +625,48 @@ class AlternativeDataCollector:
                 signals.append(f"High earnings beat probability: {whisper.beat_probability:.0%}")
         
         return signals
+
+    # ---------------- Value Scoring (Social) ---------------- #
+    def _compute_social_value_score(self, row: SocialSentiment) -> float:
+        """Compute heuristic value_score for social sentiment row.
+
+        Components (0-1 weighted sum):
+          sentiment_intensity (|sentiment_score|)         w=0.25
+          volume_score                                     w=0.20
+          momentum_score                                   w=0.15
+          influential_mentions (scaled)                    w=0.15
+          confidence                                       w=0.15
+          topic_richness (#topics up to 10 normalized)     w=0.10
+        """
+        try:
+            sent = abs(float(row.sentiment_score))
+        except Exception:
+            sent = 0.0
+        try:
+            vol = float(row.volume_score)
+        except Exception:
+            vol = 0.0
+        try:
+            mom = float(row.momentum_score)
+        except Exception:
+            mom = 0.0
+        try:
+            inf = min(int(row.influential_mentions), 50) / 50.0
+        except Exception:
+            inf = 0.0
+        try:
+            conf = float(row.confidence)
+        except Exception:
+            conf = 0.0
+        try:
+            topics = len(row.key_topics or [])
+            topic_rich = min(topics, 10) / 10.0
+        except Exception:
+            topic_rich = 0.0
+        score = 0.25*sent + 0.20*vol + 0.15*mom + 0.15*inf + 0.15*conf + 0.10*topic_rich
+        if score < 0: score = 0.0
+        if score > 1: score = 1.0
+        return score
     
     # Mock data methods for development/testing
     def _mock_options_flow(self, symbol: str) -> List[OptionsFlow]:
@@ -616,3 +808,355 @@ async def get_alternative_signals(symbol: str) -> Dict[str, Any]:
     """
     collector = await get_alternative_data_collector()
     return await collector.get_comprehensive_alternative_data(symbol)
+
+    # ---------------------- Persistence & Metrics Helpers ---------------------- #
+
+    def _register_metrics(self):  # type: ignore[no-redef]
+        """Register Prometheus counters (idempotent)."""
+        if not Counter:
+            return
+        try:
+            # New normalized metric names *_rows_persisted_total (keep legacy for dashboards until migrated)
+            if 'social_postgres_rows_persisted_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_postgres_rows_persisted_total'] = Counter(
+                        'social_postgres_rows_persisted_total', 'Total social sentiment rows persisted to Postgres'
+                    )
+                except Exception:
+                    self.prom_metrics['social_postgres_rows_persisted_total'] = None  # type: ignore
+            if 'social_questdb_rows_persisted_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_questdb_rows_persisted_total'] = Counter(
+                        'social_questdb_rows_persisted_total', 'Total social sentiment rows persisted to QuestDB'
+                    )
+                except Exception:
+                    self.prom_metrics['social_questdb_rows_persisted_total'] = None  # type: ignore
+            # Legacy names (backward compatibility)
+            if 'social_postgres_rows_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_postgres_rows_total'] = Counter(
+                        'social_postgres_rows_total', 'Total social sentiment rows persisted to Postgres (legacy)'
+                    )
+                except Exception:
+                    self.prom_metrics['social_postgres_rows_total'] = None  # type: ignore
+            if 'social_questdb_rows_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_questdb_rows_total'] = Counter(
+                        'social_questdb_rows_total', 'Total social sentiment rows persisted to QuestDB (legacy)'
+                    )
+                except Exception:
+                    self.prom_metrics['social_questdb_rows_total'] = None  # type: ignore
+            if 'social_persist_errors_total' not in self.prom_metrics:
+                self.prom_metrics['social_persist_errors_total'] = Counter(
+                    'social_persist_errors_total', 'Total errors during social sentiment persistence'
+                )
+            if 'social_weaviate_indexed_total' not in self.prom_metrics:
+                self.prom_metrics['social_weaviate_indexed_total'] = Counter(
+                    'social_weaviate_indexed_total', 'Total social sentiment objects indexed into Weaviate'
+                )
+            if 'social_value_score_observations_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_value_score_observations_total'] = Counter(
+                        'social_value_score_observations_total','Total social sentiment rows evaluated for value score'
+                    )
+                except Exception:
+                    self.prom_metrics['social_value_score_observations_total'] = None
+            if 'social_low_value_pruned_total' not in self.prom_metrics:
+                try:
+                    self.prom_metrics['social_low_value_pruned_total'] = Counter(
+                        'social_low_value_pruned_total','Rows (social) skipped pre-persist due to very low value_score'
+                    )
+                except Exception:
+                    self.prom_metrics['social_low_value_pruned_total'] = None
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _persist_social_sentiment(self, rows: List[SocialSentiment]):  # type: ignore[no-redef]
+        """Persist social sentiment to QuestDB + Postgres (feature-gated)."""
+        if not rows:
+            return
+        # Filter out ultra-low value rows early (does not affect already persisted history)
+        try:
+            value_floor = float(os.getenv('SOCIAL_VALUE_SCORE_FLOOR','0.0'))
+        except Exception:
+            value_floor = 0.0
+        filtered: List[SocialSentiment] = []
+        for r in rows:
+            vs = float(getattr(r, 'value_score', 0.0)) if hasattr(r, 'value_score') else 0.0
+            ctr_obs = self.prom_metrics.get('social_value_score_observations_total')
+            if ctr_obs:
+                try: ctr_obs.inc()
+                except Exception: pass
+            if vs >= value_floor:
+                filtered.append(r)
+            else:
+                ctr_pruned = self.prom_metrics.get('social_low_value_pruned_total')
+                if ctr_pruned:
+                    try: ctr_pruned.inc()
+                    except Exception: pass
+        rows = filtered
+        if not rows:
+            return
+        # QuestDB path
+        if self.enable_questdb_persist and not self.enable_hist_dry_run and Sender and self.questdb_conf:
+            try:
+                with Sender.from_conf(self.questdb_conf) as s:  # type: ignore[arg-type]
+                    for r in rows:
+                        at_ts = (
+                            TimestampNanos.from_datetime(r.timestamp)
+                            if TimestampNanos is not None else int(r.timestamp.timestamp() * 1_000_000_000)
+                        )
+                        s.row(
+                            'social_events',
+                            symbols={
+                                'platform': r.platform,
+                                'symbol': r.symbol.upper(),
+                            },
+                            columns={
+                                'sentiment': float(r.sentiment_score),
+                                # Flatten additional numeric features
+                                'volume_score': float(r.volume_score),
+                                'momentum_score': float(r.momentum_score),
+                                'influential_mentions': int(r.influential_mentions),
+                                'confidence': float(r.confidence),
+                                'value_score': float(getattr(r, 'value_score', 0.0)),
+                                'topics': ','.join(r.key_topics[:20]) if r.key_topics else ''
+                            },
+                            at=at_ts,
+                        )
+                    s.flush()
+                ctr_new = self.prom_metrics.get('social_questdb_rows_persisted_total')
+                ctr_legacy = self.prom_metrics.get('social_questdb_rows_total')
+                for ctr in (ctr_new, ctr_legacy):
+                    if ctr:
+                        try:
+                            ctr.inc(len(rows))
+                        except Exception:
+                            pass
+            except Exception as e:  # noqa: BLE001
+                err_ctr = self.prom_metrics.get('social_persist_errors_total')
+                if err_ctr:
+                    try:
+                        err_ctr.inc()
+                    except Exception:
+                        pass
+                logger.debug("QuestDB social persist failed: %s", e)
+        # Postgres path
+        if self.enable_postgres_persist and not self.enable_hist_dry_run:
+            try:
+                from trading_common.database_manager import get_database_manager  # type: ignore
+                dbm = await get_database_manager()
+                async with dbm.get_postgres() as pg:  # type: ignore[attr-defined]
+                    await pg.execute("""
+                        CREATE TABLE IF NOT EXISTS social_events (
+                            symbol TEXT NOT NULL,
+                            platform TEXT NOT NULL,
+                            ts TIMESTAMPTZ NOT NULL,
+                            sentiment_score DOUBLE PRECISION NOT NULL,
+                            volume_score DOUBLE PRECISION NOT NULL,
+                            momentum_score DOUBLE PRECISION NOT NULL,
+                            key_topics JSONB,
+                            influential_mentions INT,
+                            confidence DOUBLE PRECISION,
+                            value_score DOUBLE PRECISION DEFAULT 0,
+                            inserted_at TIMESTAMPTZ DEFAULT NOW(),
+                            PRIMARY KEY(symbol, platform, ts)
+                        )
+                    """)
+                    insert_rows = [
+                        (
+                            r.symbol.upper(), r.platform, r.timestamp,
+                            float(r.sentiment_score), float(r.volume_score), float(r.momentum_score),
+                            json.dumps(r.key_topics[:50] if r.key_topics else []),
+                            int(r.influential_mentions), float(r.confidence), float(getattr(r, 'value_score', 0.0))
+                        ) for r in rows
+                    ]
+                    try:
+                        await pg.executemany(
+                            """
+                            INSERT INTO social_events(symbol, platform, ts, sentiment_score, volume_score, momentum_score, key_topics, influential_mentions, confidence, value_score)
+                            VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            insert_rows
+                        )
+                    except Exception:
+                        for row in insert_rows:
+                            try:
+                                await pg.execute(
+                                    """
+                                    INSERT INTO social_events(symbol, platform, ts, sentiment_score, volume_score, momentum_score, key_topics, influential_mentions, confidence, value_score)
+                                    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10) ON CONFLICT DO NOTHING
+                                    """,
+                                    *row
+                                )
+                            except Exception:
+                                pass
+                    ctr_new = self.prom_metrics.get('social_postgres_rows_persisted_total')
+                    ctr_legacy = self.prom_metrics.get('social_postgres_rows_total')
+                    for ctr in (ctr_new, ctr_legacy):
+                        if ctr:
+                            try:
+                                ctr.inc(len(rows))
+                            except Exception:
+                                pass
+            except Exception as e:  # noqa: BLE001
+                err_ctr = self.prom_metrics.get('social_persist_errors_total')
+                if err_ctr:
+                    try:
+                        err_ctr.inc()
+                    except Exception:
+                        pass
+                logger.debug("Postgres social persist failed: %s", e)
+
+    async def _index_social_to_weaviate(self, rows: List[SocialSentiment]):  # type: ignore[no-redef]
+        """Send social sentiment rows to ML service, fallback to direct indexing.
+
+        Simplified retry loop (3 attempts) then fallback on final failure.
+        """
+        if not rows or not self.session:
+            return
+        payload_items = []
+        for r in rows:
+            try:
+                payload_items.append({
+                    'symbol': r.symbol.upper(),
+                    'platform': r.platform,
+                    'sentiment': float(r.sentiment_score),
+                    'volume_score': float(r.volume_score),
+                    'momentum_score': float(r.momentum_score),
+                    'influential_mentions': int(r.influential_mentions),
+                    'confidence': float(r.confidence),
+                    'value_score': float(getattr(r, 'value_score', 0.0)),
+                    'topics': r.key_topics[:25] if r.key_topics else [],
+                    'timestamp': r.timestamp.isoformat()
+                })
+            except Exception:
+                continue
+        if not payload_items:
+            return
+        endpoint = self.ml_service_url.rstrip('/') + '/vector/index/social'
+        for attempt in range(3):
+            try:
+                async with self.session.post(endpoint, json={'items': payload_items}, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    if resp.status == 200:
+                        ctr = self.prom_metrics.get('social_weaviate_indexed_total')
+                        if ctr:
+                            try:
+                                ctr.inc(len(payload_items))
+                            except Exception:
+                                pass
+                        return
+                    await resp.text()  # consume body
+                    raise RuntimeError(f"HTTP {resp.status}")
+            except Exception:  # noqa: BLE001
+                if attempt < 2:
+                    await asyncio.sleep(1.2 * (attempt + 1))
+                    continue
+                # Fallback path (final attempt failed)
+                try:
+                    from shared.vector.indexing import index_social_fallback  # type: ignore
+                    redis = None
+                    try:
+                        if self.cache:
+                            redis = getattr(self.cache, 'redis', None) or self.cache
+                    except Exception:  # noqa: BLE001
+                        redis = None
+                    inserted = 0
+                    try:
+                        inserted = await index_social_fallback(list(payload_items), redis=redis)
+                    except Exception:
+                        inserted = 0
+                    if inserted:
+                        try:
+                            from prometheus_client import Counter as _PC  # type: ignore
+                            if 'social_weaviate_fallback_indexed_total' not in self.prom_metrics:
+                                try:
+                                    self.prom_metrics['social_weaviate_fallback_indexed_total'] = _PC(
+                                        'social_weaviate_fallback_indexed_total', 'Total social sentiment objects indexed via fallback path'
+                                    )
+                                except Exception:
+                                    self.prom_metrics['social_weaviate_fallback_indexed_total'] = None
+                            ctr_fb = self.prom_metrics.get('social_weaviate_fallback_indexed_total')
+                            if ctr_fb:
+                                try:
+                                    ctr_fb.inc(inserted)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return
+
+    # ---------------------- Streaming (Pulsar) Helpers ---------------------- #
+    def _bucket_acquire(self) -> bool:
+        """Acquire a token from adaptive bucket (non-blocking)."""
+        now = datetime.utcnow()
+        elapsed = (now - self._bucket_last).total_seconds()
+        self._bucket_last = now
+        self._bucket_tokens = min(self._bucket_capacity, self._bucket_tokens + elapsed * self._bucket_rate)
+        if self._bucket_tokens >= 1.0:
+            self._bucket_tokens -= 1.0
+            return True
+        return False
+
+    def _rate_limited_pulsar_error(self, msg: str):
+        """Rate-limit noisy Pulsar error logs (token bucket)."""
+        refill_interval = 30  # seconds
+        now = datetime.utcnow()
+        if (now - self._pulsar_error_last_refill).total_seconds() > refill_interval:
+            self._pulsar_error_tokens = 15
+            self._pulsar_error_last_refill = now
+        if self._pulsar_error_tokens > 0:
+            self._pulsar_error_tokens -= 1
+            try:
+                logger.warning(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _publish_social_sentiment(self, rows: List[SocialSentiment]):
+        """Publish social sentiment events to streaming topic (one per row).
+
+        Best-effort: skips silently if producer unavailable or token bucket depleted.
+        """
+        if not rows or not self.producer:
+            return
+        for r in rows:
+            if not self._bucket_acquire():  # backpressure skip
+                try:
+                    from prometheus_client import Counter as _PC  # type: ignore
+                    if 'social_publish_skipped' not in self.prom_metrics:
+                        try:
+                            self.prom_metrics['social_publish_skipped'] = _PC('producer_publish_skipped_total','Messages skipped before publish due to backpressure',['service','reason'])
+                        except Exception:
+                            self.prom_metrics['social_publish_skipped'] = None
+                    ctr = self.prom_metrics.get('social_publish_skipped')
+                    if ctr:
+                        try:
+                            ctr.labels(service='social', reason='rate_limited').inc()
+                        except Exception:
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            payload = {
+                'symbol': r.symbol.upper(),
+                'platform': r.platform,
+                'sentiment_score': float(r.sentiment_score),
+                'volume_score': float(r.volume_score),
+                'momentum_score': float(r.momentum_score),
+                'influential_mentions': int(r.influential_mentions),
+                'confidence': float(r.confidence),
+                'topics': r.key_topics[:25] if r.key_topics else [],
+                'timestamp': r.timestamp.isoformat()
+            }
+            try:
+                self.producer.send(json.dumps(payload, default=str).encode('utf-8'))
+            except Exception as e:  # noqa: BLE001
+                if self._pulsar_error_counter:
+                    try:
+                        self._pulsar_error_counter.inc()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._rate_limited_pulsar_error(f"Failed to publish social sentiment: {e}")

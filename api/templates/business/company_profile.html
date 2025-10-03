@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Company: {{ symbol }}</h1>
+<section class="panel" id="forecast">
+  <h2>Forecast Snapshot</h2>
+  <div id="forecast-body">Loading...</div>
+</section>
+<section class="panel" id="report">
+  <h2>Summary Report</h2>
+  <div id="report-body">Loading...</div>
+</section>
+<script nonce="{{ csp_nonce }}" src="/static/js/company_profile.js"></script>
+{% endblock %}

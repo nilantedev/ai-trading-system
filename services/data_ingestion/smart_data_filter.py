@@ -38,7 +38,9 @@ class SmartDataFilter:
     def __init__(self, 
                  min_quality_score: float = 0.6,
                  volume_surge_threshold: float = 2.0,
-                 volatility_threshold: float = 0.02):
+                 volatility_threshold: float = 0.02,
+                 enable_adaptive_filtering: bool = True,
+                 enable_anomaly_detection: bool = True):
         """
         Initialize smart data filter.
         
@@ -50,11 +52,25 @@ class SmartDataFilter:
         self.min_quality_score = min_quality_score
         self.volume_surge_threshold = volume_surge_threshold  
         self.volatility_threshold = volatility_threshold
+        self.enable_adaptive_filtering = enable_adaptive_filtering
+        self.enable_anomaly_detection = enable_anomaly_detection
         
-        # Historical data for comparison
-        self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
-        self.volume_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
-        self.volatility_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
+        # Historical data for comparison (optimized buffer sizes)
+        self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self.volume_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self.volatility_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
+        
+        # Adaptive filtering parameters
+        if enable_adaptive_filtering:
+            self.adaptive_thresholds: Dict[str, Dict[str, float]] = defaultdict(
+                lambda: {'quality': min_quality_score, 'volume': volume_surge_threshold}
+            )
+            self.performance_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        
+        # Anomaly detection using Z-score and IQR
+        if enable_anomaly_detection:
+            self.zscore_threshold = 3.0  # Standard deviations for outlier detection
+            self.iqr_multiplier = 1.5    # IQR multiplier for outliers
         
         # Performance tracking
         self.total_data_points = 0
@@ -70,7 +86,12 @@ class SmartDataFilter:
     
     async def initialize(self):
         """Initialize the data filter."""
-        self.cache = get_trading_cache()
+        # get_trading_cache is an async factory; ensure we await it to obtain the instance
+        try:
+            self.cache = await get_trading_cache()  # type: ignore[func-returns-value]
+        except Exception:
+            # Fall back to None on failure; filtering can proceed without cache
+            self.cache = None
         logger.info("Smart Data Filter initialized")
     
     async def should_process_data(self, market_data: MarketData) -> DataQualityScore:
@@ -108,19 +129,40 @@ class SmartDataFilter:
             0.10 * (1.0 - noise_ratio) # 10% - Lower noise is better
         )
         
+        # Check for anomalies
+        is_anomaly, anomaly_type = self._detect_anomaly(symbol, market_data)
+        
+        # Use adaptive threshold if enabled
+        if self.enable_adaptive_filtering and symbol in self.adaptive_thresholds:
+            threshold = self.adaptive_thresholds[symbol]['quality']
+        else:
+            threshold = self.min_quality_score
+        
         # Decision logic
-        should_process = overall_score >= self.min_quality_score
+        should_process = overall_score >= threshold
         
         # Special cases for forced processing
         if not should_process:
+            # Always process anomalies as they may indicate important market events
+            if is_anomaly:
+                should_process = True
+                overall_score = max(overall_score, 0.75)
+                logger.info(f"Processing anomaly for {symbol}: {anomaly_type}")
             # Always process if extreme volume spike (5x+ average)
-            if volume_score > 0.9:
+            elif volume_score > 0.9:
                 should_process = True
                 overall_score = max(overall_score, 0.85)
             # Always process if major price movement (5%+)
             elif volatility_score > 0.9:
                 should_process = True
                 overall_score = max(overall_score, 0.80)
+        
+        # Update adaptive thresholds based on this decision
+        if self.enable_adaptive_filtering:
+            self._update_adaptive_thresholds(symbol, DataQualityScore(
+                overall_score, volume_score, volatility_score, momentum_score,
+                timing_score, noise_ratio, should_process, ""
+            ))
         
         # Generate reasoning
         reasoning = self._generate_reasoning(
@@ -320,6 +362,95 @@ class SmartDataFilter:
             return f"Moderate signal: {', '.join(reasons)}"
         else:
             return f"Low-value signal: {', '.join(reasons)}"
+    
+    def _detect_anomaly(self, symbol: str, market_data: MarketData) -> Tuple[bool, str]:
+        """
+        Detect anomalies using statistical methods.
+        
+        Returns:
+            Tuple of (is_anomaly, anomaly_type)
+        """
+        if not self.enable_anomaly_detection:
+            return False, ""
+        
+        # Need enough history for statistical analysis
+        if len(self.price_history[symbol]) < 20:
+            return False, "insufficient_data"
+        
+        prices = list(self.price_history[symbol])
+        volumes = list(self.volume_history[symbol])
+        
+        # Z-score anomaly detection for price
+        price_mean = statistics.mean(prices)
+        price_std = statistics.stdev(prices)
+        if price_std > 0:
+            price_zscore = abs((market_data.close - price_mean) / price_std)
+            if price_zscore > self.zscore_threshold:
+                return True, f"price_anomaly_zscore_{price_zscore:.2f}"
+        
+        # IQR anomaly detection for volume
+        volumes_sorted = sorted(volumes)
+        q1 = volumes_sorted[len(volumes_sorted) // 4]
+        q3 = volumes_sorted[3 * len(volumes_sorted) // 4]
+        iqr = q3 - q1
+        
+        if iqr > 0:
+            lower_bound = q1 - self.iqr_multiplier * iqr
+            upper_bound = q3 + self.iqr_multiplier * iqr
+            if market_data.volume < lower_bound or market_data.volume > upper_bound:
+                return True, f"volume_anomaly_iqr"
+        
+        # Check for price gaps
+        if len(prices) > 1:
+            last_price = prices[-2]
+            price_gap = abs((market_data.close - last_price) / last_price)
+            if price_gap > 0.05:  # 5% gap
+                return True, f"price_gap_{price_gap:.2%}"
+        
+        return False, ""
+    
+    def _update_adaptive_thresholds(self, symbol: str, quality_score: DataQualityScore):
+        """
+        Update adaptive filtering thresholds based on performance.
+        """
+        if not self.enable_adaptive_filtering:
+            return
+        
+        # Track whether our decisions were good
+        self.performance_history[symbol].append(quality_score.overall_score)
+        
+        if len(self.performance_history[symbol]) >= 50:
+            recent_scores = list(self.performance_history[symbol])[-50:]
+            avg_score = statistics.mean(recent_scores)
+            
+            # Adjust thresholds based on performance
+            current_threshold = self.adaptive_thresholds[symbol]['quality']
+            
+            # If we're filtering too much valuable data, lower threshold
+            if avg_score > 0.7 and current_threshold > 0.5:
+                self.adaptive_thresholds[symbol]['quality'] *= 0.95
+                logger.debug(f"Lowering quality threshold for {symbol} to {self.adaptive_thresholds[symbol]['quality']:.3f}")
+            
+            # If we're processing too much noise, raise threshold
+            elif avg_score < 0.4 and current_threshold < 0.8:
+                self.adaptive_thresholds[symbol]['quality'] *= 1.05
+                logger.debug(f"Raising quality threshold for {symbol} to {self.adaptive_thresholds[symbol]['quality']:.3f}")
+    
+    async def batch_filter_data(self, data_batch: List[MarketData]) -> List[Tuple[MarketData, DataQualityScore]]:
+        """
+        Efficiently filter a batch of market data.
+        
+        Returns:
+            List of (data, score) tuples for data that should be processed
+        """
+        results = []
+        
+        for market_data in data_batch:
+            score = await self.should_process_data(market_data)
+            if score.should_process:
+                results.append((market_data, score))
+        
+        return results
     
     async def get_filter_statistics(self) -> Dict[str, float]:
         """Get filtering performance statistics."""

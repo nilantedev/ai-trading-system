@@ -1,0 +1,31 @@
+groups:
+  - name: service-traffic
+    interval: 30s
+    rules:
+      - alert: HighHttp5xxRate
+        expr: sum by (service)(increase(app_http_requests_total{code=~"5.."}[5m]))
+              / clamp_min(sum by (service)(increase(app_http_requests_total[5m])),1) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx error rate for {{ $labels.service }}"
+          description: ">5% 5xx responses over 5m window. Check application logs and recent deploys."
+
+      - alert: SuddenTrafficDrop
+        expr: rate(app_http_requests_total[5m]) < 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low traffic for {{ $labels.service }}"
+          description: "HTTP request rate below expected threshold (<0.1 rps) for 10m. Possible upstream routing or crash loop."
+
+      - alert: ElevatedLatencyP95
+        expr: histogram_quantile(0.95, sum by (service, le)(rate(app_http_request_latency_seconds_bucket[5m]))) > 1.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High p95 latency for {{ $labels.service }}"
+          description: "p95 request latency >1.5s for 5m. Investigate dependency slowness or resource saturation."

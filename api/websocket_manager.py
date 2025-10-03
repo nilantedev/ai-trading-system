@@ -500,8 +500,26 @@ class ConnectionManager:
         }
 
 
-# Global connection manager
+# Lifecycle helpers used by app startup/shutdown
+async def start_websocket_streaming():
+    global websocket_streamer
+    if websocket_streamer is None:
+        websocket_streamer = WebSocketStreamer(connection_manager)
+    if not websocket_streamer.is_streaming:
+        asyncio.create_task(websocket_streamer.start_streaming())
+    return websocket_streamer
+
+
+async def stop_websocket_streaming():
+    global websocket_streamer
+    if websocket_streamer and websocket_streamer.is_streaming:
+        await websocket_streamer.stop_streaming()
+    return True
+
+
+# Global connection manager and streamer instance
 connection_manager = ConnectionManager()
+websocket_streamer = None  # lazily initialized at runtime
 
 
 class WebSocketStreamer:

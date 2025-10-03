@@ -1,0 +1,66 @@
+groups:
+  - name: slo-burn
+    interval: 30s
+    rules:
+      # Error ratio SLO (example target 99% success => 1% error budget)
+      # Burn rate windows (5m/1h) fast; (30m/6h) medium.
+      - record: service:http_error_ratio:rate5m
+        expr: |
+          sum by (service) (increase(app_http_requests_total{code=~"5.."}[5m]))
+            /
+          sum by (service) (increase(app_http_requests_total[5m]))
+      - record: service:http_error_ratio:rate1h
+        expr: |
+          sum by (service) (increase(app_http_requests_total{code=~"5.."}[1h]))
+            /
+          sum by (service) (increase(app_http_requests_total[1h]))
+      - record: service:http_error_ratio:rate30m
+        expr: |
+          sum by (service) (increase(app_http_requests_total{code=~"5.."}[30m]))
+            /
+          sum by (service) (increase(app_http_requests_total[30m]))
+      - record: service:http_error_ratio:rate6h
+        expr: |
+          sum by (service) (increase(app_http_requests_total{code=~"5.."}[6h]))
+            /
+          sum by (service) (increase(app_http_requests_total[6h]))
+
+      # Fast burn (alert quickly if consuming budget > 14x SLO over short window)
+      - alert: SLOFastBurn
+        expr: (service:http_error_ratio:rate5m > 0.14) and (service:http_error_ratio:rate1h > 0.07)
+        for: 5m
+        labels:
+          severity: critical
+          category: slo
+        annotations:
+          summary: "Fast SLO burn ({{ $labels.service }})"
+          description: |-
+            Error budget burning too fast. 5m error ratio={{ $value | humanizePercentage }}; 1h window elevated. Investigate recent deploys, dependency errors, breaker state.
+
+      # Medium burn (sustained budget consumption)
+      - alert: SLOMediumBurn
+        expr: (service:http_error_ratio:rate30m > 0.05) and (service:http_error_ratio:rate6h > 0.025)
+        for: 30m
+        labels:
+          severity: warning
+          category: slo
+        annotations:
+          summary: "Sustained SLO burn ({{ $labels.service }})"
+          description: |-
+            Sustained elevated error ratio. 30m={{ $value | humanizePercentage }}; 6h window above threshold. Plan remediation before exhaustion of error budget.
+
+      # Readiness degradation burn (tracking readiness gauge transitions)
+      - record: service:unready_seconds:rate5m
+        expr: |
+          sum by (service) (increase(service_readiness_state{service!="",service_readiness_state="2"}[5m]))
+      # Using state==2 as degraded; treat time in degraded as linear consumption fraction (simplified)
+      - alert: ReadinessDegradedFast
+        expr: service:unready_seconds:rate5m > 60
+        for: 5m
+        labels:
+          severity: warning
+          category: slo
+        annotations:
+          summary: "Rapid readiness degradation ({{ $labels.service }})"
+          description: |-
+            Service spent significant time degraded in last 5m. Investigate open circuit breakers, dependency connectivity, startup loops.

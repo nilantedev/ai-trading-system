@@ -72,61 +72,106 @@ class TradingCache:
     """High-level trading data cache with intelligent expiration."""
     
     def __init__(self):
-        self.db_manager = None
+        self.redis_client = None
         self._cache_stats = {
             'hits': 0,
             'misses': 0,
             'sets': 0,
             'errors': 0
         }
+
+    @property
+    def client(self):
+        """Expose underlying aioredis client for compatibility with legacy callers.
+
+        Best-effort: returns None until initialize() runs. Prefer using typed helpers
+        on TradingCache when possible.
+        """
+        try:
+            return getattr(self.redis_client, 'client', None)
+        except Exception:  # noqa: BLE001
+            return None
     
     async def initialize(self):
         """Initialize cache connection."""
-        self.db_manager = await get_database_manager()
+        from .database import get_redis_client
+        self.redis_client = get_redis_client()
+        await self.redis_client.connect()
         logger.info("Trading cache initialized")
     
     async def _get_redis(self):
         """Get Redis connection."""
-        if not self.db_manager:
+        if not self.redis_client:
             await self.initialize()
-        return self.db_manager.get_redis()
+        return self.redis_client.client
     
     # Market Data Caching
     async def cache_market_data(self, data: MarketData, timeframe: str = "1m", ttl: int = 300):
         """Cache market data with automatic key generation."""
         try:
-            async with await self._get_redis() as r:
-                # Cache latest data
-                latest_key = CacheKeyGenerator.market_data_latest(data.symbol)
-                await r.setex(latest_key, ttl, data.json())
-                
-                # Cache in time-series structure
-                ts_key = CacheKeyGenerator.market_data(data.symbol, timeframe)
-                score = data.timestamp.timestamp()
-                await r.zadd(ts_key, {data.json(): score})
-                await r.expire(ts_key, ttl * 2)  # Longer TTL for time series
-                
-                self._cache_stats['sets'] += 1
-                logger.debug(f"Cached market data for {data.symbol}")
+            r = await self._get_redis()
+            # Cache latest data
+            latest_key = CacheKeyGenerator.market_data_latest(data.symbol)
+            await r.setex(latest_key, ttl, data.json())
+            
+            # Cache in time-series structure
+            ts_key = CacheKeyGenerator.market_data(data.symbol, timeframe)
+            score = data.timestamp.timestamp()
+            await r.zadd(ts_key, {data.json(): score})
+            await r.expire(ts_key, ttl * 2)  # Longer TTL for time series
+            
+            self._cache_stats['sets'] += 1
+            logger.debug(f"Cached market data for {data.symbol}")
                 
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to cache market data: {e}")
+
+    # Backwards-compat alias used by some services
+    async def set_market_data(self, data: MarketData, timeframe: str = "1m", ttl: int = 300):
+        """Backwards-compat alias; defensively handle accidental awaitables.
+
+        Some callers may accidentally pass a coroutine/awaitable instead of a
+        resolved MarketData instance. To make the caching layer robust, detect
+        and await such values before proceeding. If the awaited value is still
+        not a MarketData instance, drop gracefully and log a debug message.
+        """
+        try:
+            # If an awaitable slipped through, await it here
+            if asyncio.iscoroutine(data):  # coroutine object
+                data = await data  # type: ignore[assignment]
+            else:
+                # Best-effort support for custom awaitables implementing __await__
+                __await__ = getattr(data, "__await__", None)  # type: ignore[attr-defined]
+                if callable(__await__):
+                    data = await data  # type: ignore[func-returns-value, assignment]
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Failed awaiting awaitable market_data in set_market_data: {e}")
+            return False
+
+        # Validate minimal contract before caching
+        try:
+            _ = getattr(data, 'symbol')  # type: ignore[attr-defined]
+            _ = getattr(data, 'timestamp')  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("set_market_data received non-MarketData payload; dropping")
+            return False
+
+        return await self.cache_market_data(data, timeframe=timeframe, ttl=ttl)
     
     async def get_latest_market_data(self, symbol: str) -> Optional[MarketData]:
         """Get latest cached market data."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.market_data_latest(symbol)
-                data = await r.get(key)
-                
-                if data:
-                    self._cache_stats['hits'] += 1
-                    return MarketData.parse_raw(data)
-                else:
-                    self._cache_stats['misses'] += 1
-                    return None
-                    
+            r = await self._get_redis()
+            key = CacheKeyGenerator.market_data_latest(symbol)
+            data = await r.get(key)
+            if data:
+                self._cache_stats['hits'] += 1
+                return MarketData.parse_raw(data)
+            else:
+                self._cache_stats['misses'] += 1
+                return None
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get cached market data: {e}")
@@ -136,18 +181,17 @@ class TradingCache:
                                    limit: int = 100) -> List[MarketData]:
         """Get cached market data time series."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.market_data(symbol, timeframe)
-                # Get recent entries (highest scores = most recent)
-                data_list = await r.zrevrange(key, 0, limit - 1)
-                
-                if data_list:
-                    self._cache_stats['hits'] += 1
-                    return [MarketData.parse_raw(item) for item in data_list]
-                else:
-                    self._cache_stats['misses'] += 1
-                    return []
-                    
+            r = await self._get_redis()
+            key = CacheKeyGenerator.market_data(symbol, timeframe)
+            # Get recent entries (highest scores = most recent)
+            data_list = await r.zrevrange(key, 0, limit - 1)
+            if data_list:
+                self._cache_stats['hits'] += 1
+                return [MarketData.parse_raw(item) for item in data_list]
+            else:
+                self._cache_stats['misses'] += 1
+                return []
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get market data series: {e}")
@@ -157,18 +201,17 @@ class TradingCache:
     async def cache_portfolio_snapshot(self, snapshot: PortfolioSnapshot, ttl: int = 60):
         """Cache portfolio snapshot."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.portfolio_snapshot(snapshot.portfolio_id)
-                await r.setex(key, ttl, snapshot.json())
-                
-                # Also cache individual positions
-                for position in snapshot.positions:
-                    pos_key = CacheKeyGenerator.position(snapshot.portfolio_id, position.symbol)
-                    await r.setex(pos_key, ttl, position.json())
-                
-                self._cache_stats['sets'] += 1
-                logger.debug(f"Cached portfolio snapshot for {snapshot.portfolio_id}")
-                
+            r = await self._get_redis()
+            key = CacheKeyGenerator.portfolio_snapshot(snapshot.portfolio_id)
+            await r.setex(key, ttl, snapshot.json())
+            # Also cache individual positions
+            for position in snapshot.positions:
+                pos_key = CacheKeyGenerator.position(snapshot.portfolio_id, position.symbol)
+                await r.setex(pos_key, ttl, position.json())
+            
+            self._cache_stats['sets'] += 1
+            logger.debug(f"Cached portfolio snapshot for {snapshot.portfolio_id}")
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to cache portfolio snapshot: {e}")
@@ -176,17 +219,16 @@ class TradingCache:
     async def get_portfolio_snapshot(self, portfolio_id: str) -> Optional[PortfolioSnapshot]:
         """Get cached portfolio snapshot."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.portfolio_snapshot(portfolio_id)
-                data = await r.get(key)
-                
-                if data:
-                    self._cache_stats['hits'] += 1
-                    return PortfolioSnapshot.parse_raw(data)
-                else:
-                    self._cache_stats['misses'] += 1
-                    return None
-                    
+            r = await self._get_redis()
+            key = CacheKeyGenerator.portfolio_snapshot(portfolio_id)
+            data = await r.get(key)
+            if data:
+                self._cache_stats['hits'] += 1
+                return PortfolioSnapshot.parse_raw(data)
+            else:
+                self._cache_stats['misses'] += 1
+                return None
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get cached portfolio: {e}")
@@ -195,17 +237,17 @@ class TradingCache:
     async def get_position(self, portfolio_id: str, symbol: str) -> Optional[Position]:
         """Get cached position data."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.position(portfolio_id, symbol)
-                data = await r.get(key)
-                
-                if data:
-                    self._cache_stats['hits'] += 1
-                    return Position.parse_raw(data)
-                else:
-                    self._cache_stats['misses'] += 1
-                    return None
-                    
+            r = await self._get_redis()
+            key = CacheKeyGenerator.position(portfolio_id, symbol)
+            data = await r.get(key)
+            
+            if data:
+                self._cache_stats['hits'] += 1
+                return Position.parse_raw(data)
+            else:
+                self._cache_stats['misses'] += 1
+                return None
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get cached position: {e}")
@@ -215,25 +257,25 @@ class TradingCache:
     async def cache_trading_signal(self, signal: TradingSignal, ttl: int = 3600):
         """Cache trading signal."""
         try:
-            async with await self._get_redis() as r:
-                # Individual signal cache
-                key = CacheKeyGenerator.trading_signal(signal.id)
-                await r.setex(key, ttl, signal.json())
+            r = await self._get_redis()
+            # Individual signal cache
+            key = CacheKeyGenerator.trading_signal(signal.id)
+            await r.setex(key, ttl, signal.json())
+            
+            # Add to active signals set if active
+            if signal.status.value == "active":
+                active_key = CacheKeyGenerator.active_signals(signal.symbol)
+                await r.sadd(active_key, signal.id)
+                await r.expire(active_key, ttl)
                 
-                # Add to active signals set if active
-                if signal.status.value == "active":
-                    active_key = CacheKeyGenerator.active_signals(signal.symbol)
-                    await r.sadd(active_key, signal.id)
-                    await r.expire(active_key, ttl)
-                    
-                    # Global active signals
-                    global_active = CacheKeyGenerator.active_signals()
-                    await r.sadd(global_active, signal.id)
-                    await r.expire(global_active, ttl)
-                
-                self._cache_stats['sets'] += 1
-                logger.debug(f"Cached trading signal {signal.id}")
-                
+                # Global active signals
+                global_active = CacheKeyGenerator.active_signals()
+                await r.sadd(global_active, signal.id)
+                await r.expire(global_active, ttl)
+            
+            self._cache_stats['sets'] += 1
+            logger.debug(f"Cached trading signal {signal.id}")
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to cache trading signal: {e}")
@@ -241,29 +283,29 @@ class TradingCache:
     async def get_active_signals(self, symbol: Optional[str] = None) -> List[TradingSignal]:
         """Get active trading signals."""
         try:
-            async with await self._get_redis() as r:
-                if symbol:
-                    active_key = CacheKeyGenerator.active_signals(symbol)
-                else:
-                    active_key = CacheKeyGenerator.active_signals()
-                
-                signal_ids = await r.smembers(active_key)
-                
-                if not signal_ids:
-                    self._cache_stats['misses'] += 1
-                    return []
-                
-                # Get full signal data
-                signals = []
-                for signal_id in signal_ids:
-                    key = CacheKeyGenerator.trading_signal(signal_id)
-                    data = await r.get(key)
-                    if data:
-                        signals.append(TradingSignal.parse_raw(data))
-                
-                self._cache_stats['hits'] += 1
-                return signals
-                
+            r = await self._get_redis()
+            if symbol:
+                active_key = CacheKeyGenerator.active_signals(symbol)
+            else:
+                active_key = CacheKeyGenerator.active_signals()
+            
+            signal_ids = await r.smembers(active_key)
+            
+            if not signal_ids:
+                self._cache_stats['misses'] += 1
+                return []
+            
+            # Get full signal data
+            signals = []
+            for signal_id in signal_ids:
+                key = CacheKeyGenerator.trading_signal(signal_id)
+                data = await r.get(key)
+                if data:
+                    signals.append(TradingSignal.parse_raw(data))
+            
+            self._cache_stats['hits'] += 1
+            return signals
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get active signals: {e}")
@@ -275,18 +317,18 @@ class TradingCache:
                                       metadata: Optional[Dict] = None, ttl: int = 300):
         """Cache technical indicator value."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.technical_indicator(symbol, indicator, timeframe)
-                
-                indicator_data = {
-                    'value': value,
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'metadata': metadata or {}
-                }
-                
-                await r.setex(key, ttl, json.dumps(indicator_data))
-                self._cache_stats['sets'] += 1
-                
+            r = await self._get_redis()
+            key = CacheKeyGenerator.technical_indicator(symbol, indicator, timeframe)
+            
+            indicator_data = {
+                'value': value,
+                'timestamp': datetime.utcnow().isoformat(),
+                'metadata': metadata or {}
+            }
+            
+            await r.setex(key, ttl, json.dumps(indicator_data))
+            self._cache_stats['sets'] += 1
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to cache technical indicator: {e}")
@@ -295,16 +337,20 @@ class TradingCache:
                                     timeframe: str) -> Optional[Dict[str, Any]]:
         """Get cached technical indicator."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.technical_indicator(symbol, indicator, timeframe)
-                data = await r.get(key)
-                
-                if data:
-                    self._cache_stats['hits'] += 1
-                    return json.loads(data)
-                else:
-                    self._cache_stats['misses'] += 1
-                    return None
+            r = await self._get_redis()
+            key = CacheKeyGenerator.technical_indicator(symbol, indicator, timeframe)
+            data = await r.get(key)
+            if data:
+                if isinstance(data, bytes):  # Redis returns bytes
+                    try:
+                        data = data.decode('utf-8')
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._cache_stats['hits'] += 1
+                return json.loads(data)
+            else:
+                self._cache_stats['misses'] += 1
+                return None
                     
         except Exception as e:
             self._cache_stats['errors'] += 1
@@ -315,16 +361,16 @@ class TradingCache:
     async def set_system_status(self, component: str, status: Dict[str, Any], ttl: int = 300):
         """Set system component status."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.system_status(component)
-                status_data = {
-                    **status,
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'component': component
-                }
-                await r.setex(key, ttl, json.dumps(status_data))
-                self._cache_stats['sets'] += 1
-                
+            r = await self._get_redis()
+            key = CacheKeyGenerator.system_status(component)
+            status_data = {
+                **status,
+                'timestamp': datetime.utcnow().isoformat(),
+                'component': component
+            }
+            await r.setex(key, ttl, json.dumps(status_data))
+            self._cache_stats['sets'] += 1
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to set system status: {e}")
@@ -332,63 +378,97 @@ class TradingCache:
     async def get_system_health(self) -> Dict[str, Any]:
         """Get overall system health."""
         try:
-            async with await self._get_redis() as r:
-                pattern = "system_status:*"
-                keys = await r.keys(pattern)
-                
-                health = {}
-                for key in keys:
-                    component = key.split(":", 1)[1]
-                    data = await r.get(key)
-                    if data:
-                        health[component] = json.loads(data)
-                
-                self._cache_stats['hits'] += 1
-                return health
-                
+            r = await self._get_redis()
+            pattern = "system_status:*"
+            keys = await r.keys(pattern)
+            
+            health = {}
+            for key in keys:
+                component = key.split(":", 1)[1]
+                data = await r.get(key)
+                if data:
+                    health[component] = json.loads(data)
+            
+            self._cache_stats['hits'] += 1
+            return health
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Failed to get system health: {e}")
             return {}
+
+    # Generic JSON helpers (convenience for service stats)
+    async def set_json(self, key: str, value: Dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Set a JSON-serialized value under key with optional TTL."""
+        try:
+            r = await self._get_redis()
+            payload = json.dumps(value)
+            if ttl and ttl > 0:
+                await r.setex(key, ttl, payload)
+            else:
+                await r.set(key, payload)
+            self._cache_stats['sets'] += 1
+            return True
+        except Exception as e:  # noqa: BLE001
+            self._cache_stats['errors'] += 1
+            logger.error(f"Failed to set JSON cache for {key}: {e}")
+            return False
+
+    async def get_json(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get a JSON value by key, parsed to Python object, or None."""
+        try:
+            r = await self._get_redis()
+            data = await r.get(key)
+            if not data:
+                self._cache_stats['misses'] += 1
+                return None
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            self._cache_stats['hits'] += 1
+            return json.loads(data)
+        except Exception as e:  # noqa: BLE001
+            self._cache_stats['errors'] += 1
+            logger.error(f"Failed to get JSON cache for {key}: {e}")
+            return None
     
     # Rate Limiting
     async def check_rate_limit(self, api_name: str, identifier: str, 
                              limit: int, window: int) -> Dict[str, Any]:
         """Check and update rate limit."""
         try:
-            async with await self._get_redis() as r:
-                key = CacheKeyGenerator.rate_limit(api_name, identifier)
-                
-                # Use sliding window rate limiting
-                now = datetime.utcnow().timestamp()
-                
-                # Remove old entries
-                await r.zremrangebyscore(key, 0, now - window)
-                
-                # Get current count
-                current_count = await r.zcard(key)
-                
-                if current_count >= limit:
-                    # Rate limited
-                    ttl = await r.ttl(key)
-                    return {
-                        'allowed': False,
-                        'current_count': current_count,
-                        'limit': limit,
-                        'reset_in': ttl
-                    }
-                
-                # Add current request
-                await r.zadd(key, {str(now): now})
-                await r.expire(key, window)
-                
+            r = await self._get_redis()
+            key = CacheKeyGenerator.rate_limit(api_name, identifier)
+            
+            # Use sliding window rate limiting
+            now = datetime.utcnow().timestamp()
+            
+            # Remove old entries
+            await r.zremrangebyscore(key, 0, now - window)
+            
+            # Get current count
+            current_count = await r.zcard(key)
+            
+            if current_count >= limit:
+                # Rate limited
+                ttl = await r.ttl(key)
                 return {
-                    'allowed': True,
-                    'current_count': current_count + 1,
+                    'allowed': False,
+                    'current_count': current_count,
                     'limit': limit,
-                    'reset_in': window
+                    'reset_in': ttl
                 }
-                
+            
+            # Add current request
+            await r.zadd(key, {str(now): now})
+            await r.expire(key, window)
+            
+            return {
+                'allowed': True,
+                'current_count': current_count + 1,
+                'limit': limit,
+                'reset_in': window
+            }
+            
         except Exception as e:
             self._cache_stats['errors'] += 1
             logger.error(f"Rate limit check failed: {e}")
@@ -398,14 +478,14 @@ class TradingCache:
     async def clear_cache_pattern(self, pattern: str) -> int:
         """Clear cache entries matching pattern."""
         try:
-            async with await self._get_redis() as r:
-                keys = await r.keys(pattern)
-                if keys:
-                    deleted = await r.delete(*keys)
-                    logger.info(f"Cleared {deleted} cache entries matching {pattern}")
-                    return deleted
-                return 0
-                
+            r = await self._get_redis()
+            keys = await r.keys(pattern)
+            if keys:
+                deleted = await r.delete(*keys)
+                logger.info(f"Cleared {deleted} cache entries matching {pattern}")
+                return deleted
+            return 0
+            
         except Exception as e:
             logger.error(f"Failed to clear cache pattern {pattern}: {e}")
             return 0
@@ -424,10 +504,10 @@ class TradingCache:
     async def flush_all_cache(self):
         """Flush all cache data (use with caution)."""
         try:
-            async with await self._get_redis() as r:
-                await r.flushdb()
-                logger.warning("Flushed all cache data")
-                
+            r = await self._get_redis()
+            await r.flushdb()
+            logger.warning("Flushed all cache data")
+            
         except Exception as e:
             logger.error(f"Failed to flush cache: {e}")
 

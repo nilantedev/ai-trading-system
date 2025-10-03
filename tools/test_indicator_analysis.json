@@ -1,0 +1,12 @@
+{
+  "symbol": "AAPL",
+  "timestamp": "2025-09-15T14:30:00Z",
+  "indicators": {
+    "rsi": 35.2,
+    "macd": 0.42,
+    "sma50_above_sma200": true
+  },
+  "overall_signal": "BUY",
+  "signal_strength": 0.78,
+  "confidence": 0.72
+}

@@ -62,11 +62,11 @@ class TradingAgentOrchestrator:
         logger.info("=== Local Model Configuration ===")
         logger.info("All models run locally via Ollama - NO API COSTS")
         logger.info("Models selected for optimal performance:")
-        logger.info("- Market Analysis: qwen2.5:72b (or mixtral:8x7b fallback)")
-        logger.info("- Risk Assessment: deepseek-r1:70b (or llama3.1:70b fallback)")
-        logger.info("- Strategy: llama3.1:70b (or mistral:7b fallback)")
-        logger.info("- Sentiment: phi3:medium (fast, efficient)")
-        logger.info("- Execution: mixtral:8x7b (fast decisions)")
+        logger.info("- Market Analysis: qwen2.5:72b (fallback mixtral:8x22b)")
+        logger.info("- Risk Assessment: deepseek-v3:latest (fallback qwen2.5:72b)")
+        logger.info("- Strategy: qwen2.5:72b (fallback phi3:14b)")
+        logger.info("- Sentiment: phi3:14b (fallback solar:10.7b)")
+        logger.info("- Execution: mixtral:8x22b (fallback phi3:14b)")
         logger.info("================================")
     
     async def make_trading_decision(self, context: TradingContext) -> TradingDecision:

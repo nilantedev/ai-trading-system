@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Risk Monitoring Service - Real-time risk analysis and alerting."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 import asyncio
 import json
 import logging
@@ -8,10 +12,14 @@ from typing import Dict, List, Optional, Any, Set
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from enum import Enum
+import numpy as np
+from scipy import stats
+from scipy.optimize import minimize
 
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_message_consumer, get_message_producer
+from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -79,6 +87,156 @@ class PortfolioRisk:
     high_risk_positions: List[str]  # Symbols with high risk
 
 
+class AdvancedRiskCalculator:
+    """Advanced risk metrics calculator with VaR, CVaR, and Monte Carlo."""
+    
+    @staticmethod
+    def calculate_var(returns: np.ndarray, confidence_level: float = 0.95, 
+                     method: str = 'historical') -> float:
+        """Calculate Value at Risk (VaR)."""
+        if len(returns) == 0:
+            return 0.0
+        
+        if method == 'historical':
+            # Historical VaR
+            var = np.percentile(returns, (1 - confidence_level) * 100)
+        elif method == 'parametric':
+            # Parametric VaR (assumes normal distribution)
+            mean = np.mean(returns)
+            std = np.std(returns)
+            var = stats.norm.ppf(1 - confidence_level, mean, std)
+        elif method == 'monte_carlo':
+            # Monte Carlo VaR
+            simulated_returns = AdvancedRiskCalculator._monte_carlo_simulation(
+                returns, n_simulations=10000
+            )
+            var = np.percentile(simulated_returns, (1 - confidence_level) * 100)
+        else:
+            var = np.percentile(returns, (1 - confidence_level) * 100)
+        
+        return abs(var)
+    
+    @staticmethod
+    def calculate_cvar(returns: np.ndarray, confidence_level: float = 0.95) -> float:
+        """Calculate Conditional Value at Risk (CVaR/Expected Shortfall)."""
+        if len(returns) == 0:
+            return 0.0
+        
+        var = AdvancedRiskCalculator.calculate_var(returns, confidence_level)
+        # CVaR is the expected loss beyond VaR
+        tail_losses = returns[returns <= -var]
+        if len(tail_losses) > 0:
+            cvar = -np.mean(tail_losses)
+        else:
+            cvar = var
+        
+        return cvar
+    
+    @staticmethod
+    def _monte_carlo_simulation(returns: np.ndarray, n_simulations: int = 10000, 
+                               n_days: int = 1) -> np.ndarray:
+        """Run Monte Carlo simulation for risk assessment."""
+        if len(returns) == 0:
+            return np.array([0.0])
+        
+        mean = np.mean(returns)
+        std = np.std(returns)
+        
+        # Generate random returns based on historical distribution
+        simulated_returns = np.random.normal(mean, std, (n_simulations, n_days))
+        
+        # Calculate cumulative returns for each simulation
+        cumulative_returns = np.prod(1 + simulated_returns, axis=1) - 1
+        
+        return cumulative_returns
+    
+    @staticmethod
+    def calculate_sharpe_ratio(returns: np.ndarray, risk_free_rate: float = 0.02) -> float:
+        """Calculate Sharpe Ratio."""
+        if len(returns) == 0 or np.std(returns) == 0:
+            return 0.0
+        
+        excess_returns = returns - risk_free_rate / 252  # Daily risk-free rate
+        return np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252)
+    
+    @staticmethod
+    def calculate_sortino_ratio(returns: np.ndarray, risk_free_rate: float = 0.02, 
+                               target_return: float = 0) -> float:
+        """Calculate Sortino Ratio (uses downside deviation)."""
+        if len(returns) == 0:
+            return 0.0
+        
+        excess_returns = returns - risk_free_rate / 252
+        downside_returns = np.minimum(returns - target_return, 0)
+        downside_std = np.std(downside_returns)
+        
+        if downside_std == 0:
+            return 0.0
+        
+        return np.mean(excess_returns) / downside_std * np.sqrt(252)
+    
+    @staticmethod
+    def calculate_calmar_ratio(returns: np.ndarray, max_drawdown: float) -> float:
+        """Calculate Calmar Ratio (annual return / max drawdown)."""
+        if max_drawdown == 0:
+            return 0.0
+        
+        annual_return = np.mean(returns) * 252
+        return annual_return / abs(max_drawdown)
+    
+    @staticmethod
+    def calculate_max_drawdown(prices: np.ndarray) -> float:
+        """Calculate maximum drawdown from price series."""
+        if len(prices) == 0:
+            return 0.0
+        
+        cumulative_returns = (1 + prices).cumprod()
+        running_max = np.maximum.accumulate(cumulative_returns)
+        drawdown = (cumulative_returns - running_max) / running_max
+        
+        return np.min(drawdown)
+    
+    @staticmethod
+    def calculate_correlation_matrix(returns_dict: Dict[str, np.ndarray]) -> np.ndarray:
+        """Calculate correlation matrix for multiple assets."""
+        if not returns_dict:
+            return np.array([[1.0]])
+        
+        symbols = list(returns_dict.keys())
+        n = len(symbols)
+        corr_matrix = np.eye(n)
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                if len(returns_dict[symbols[i]]) > 0 and len(returns_dict[symbols[j]]) > 0:
+                    # Align the series lengths
+                    min_len = min(len(returns_dict[symbols[i]]), len(returns_dict[symbols[j]]))
+                    corr = np.corrcoef(
+                        returns_dict[symbols[i]][-min_len:],
+                        returns_dict[symbols[j]][-min_len:]
+                    )[0, 1]
+                    corr_matrix[i, j] = corr
+                    corr_matrix[j, i] = corr
+        
+        return corr_matrix
+    
+    @staticmethod
+    def stress_test_portfolio(returns: np.ndarray, stress_scenarios: List[float]) -> Dict[str, float]:
+        """Apply stress tests to portfolio returns."""
+        results = {}
+        
+        for i, shock in enumerate(stress_scenarios):
+            stressed_returns = returns * (1 + shock)
+            results[f'scenario_{i+1}'] = {
+                'shock': shock,
+                'var_95': AdvancedRiskCalculator.calculate_var(stressed_returns, 0.95),
+                'cvar_95': AdvancedRiskCalculator.calculate_cvar(stressed_returns, 0.95),
+                'max_loss': np.min(stressed_returns)
+            }
+        
+        return results
+
+
 class RiskMonitoringService:
     """Service for monitoring and alerting on trading risks."""
     
@@ -115,16 +273,38 @@ class RiskMonitoringService:
         self.alerts_generated = 0
         self.risk_checks_performed = 0
         self.critical_alerts = 0
+        # Prometheus metric handles (lazy)
+        self._metrics_registered = False
+        self._risk_eval_latency = None
+        self._risk_eval_errors = None
+
+    def _register_metrics(self):
+        if self._metrics_registered:
+            return
+        try:
+            self._risk_eval_latency = Histogram(
+                'risk_assessment_latency_seconds',
+                'Latency of periodic comprehensive risk assessment'
+            )
+            self._risk_eval_errors = Counter(
+                'risk_assessment_errors_total',
+                'Total errors in periodic risk assessment loop'
+            )
+            self._metrics_registered = True
+        except Exception:  # noqa: BLE001
+            pass
         
     async def start(self):
         """Initialize and start risk monitoring service."""
         logger.info("Starting Risk Monitoring Service")
         
         try:
+            self._register_metrics()
             # Initialize connections
             self.consumer = await get_message_consumer()
             self.producer = await get_message_producer()
-            self.cache = get_trading_cache()
+            # Await the async TradingCache factory; needed for set_json/get_json calls
+            self.cache = await get_trading_cache()
             
             # Subscribe to data streams
             await self._setup_subscriptions()
@@ -132,7 +312,8 @@ class RiskMonitoringService:
             # Start monitoring tasks
             self.is_running = True
             
-            tasks = [
+            # Create background tasks without blocking
+            self.background_tasks = [
                 asyncio.create_task(self._process_market_data_queue()),
                 asyncio.create_task(self._process_signal_queue()),
                 asyncio.create_task(self._process_position_queue()),
@@ -142,7 +323,7 @@ class RiskMonitoringService:
             ]
             
             logger.info("Risk monitoring service started with 6 concurrent tasks")
-            await asyncio.gather(*tasks)
+            # Don't await gather - let tasks run in background
             
         except Exception as e:
             logger.error(f"Failed to start risk monitoring service: {e}")
@@ -152,6 +333,12 @@ class RiskMonitoringService:
         """Stop risk monitoring service gracefully."""
         logger.info("Stopping Risk Monitoring Service")
         self.is_running = False
+        
+        # Cancel background tasks
+        if hasattr(self, 'background_tasks'):
+            for task in self.background_tasks:
+                task.cancel()
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
         
         if self.consumer:
             await self.consumer.close()
@@ -218,7 +405,8 @@ class RiskMonitoringService:
     async def _handle_signal_message(self, message):
         """Handle trading signal for risk assessment."""
         try:
-            signal_data = json.loads(message) if isinstance(message, str) else message
+            # Normalize incoming TradingSignal (Avro Record or dict/JSON string) to a dict
+            signal_data = self._normalize_trading_signal(message)
             await self.signal_queue.put(signal_data)
         except Exception as e:
             logger.error(f"Failed to handle signal message: {e}")
@@ -279,9 +467,10 @@ class RiskMonitoringService:
                 
                 if not risk_check['approved']:
                     # Generate risk alert for rejected signal
+                    symbol = signal_data.get('symbol') if isinstance(signal_data, dict) else None
                     alert = RiskAlert(
-                        alert_id=f"signal_risk_{signal_data['symbol']}_{datetime.utcnow().timestamp()}",
-                        symbol=signal_data['symbol'],
+                        alert_id=f"signal_risk_{symbol}_{datetime.utcnow().timestamp()}",
+                        symbol=symbol or "UNKNOWN",
                         alert_type=AlertType.POSITION_LIMIT,
                         risk_level=RiskLevel.HIGH,
                         timestamp=datetime.utcnow(),
@@ -300,6 +489,78 @@ class RiskMonitoringService:
                 continue
             except Exception as e:
                 logger.error(f"Signal risk processing error: {e}")
+
+    def _normalize_trading_signal(self, raw: Any) -> Dict[str, Any]:
+        """Normalize incoming trading signal to a dict shape our validator expects.
+
+        Expected output keys: symbol, recommended_action, position_size, confidence, strategy_name, timestamp
+        """
+        try:
+            # If raw is a JSON string, parse it
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    return {'recommended_action': 'HOLD', 'symbol': raw, 'position_size': 0.0, 'confidence': 0.0}
+
+            # Avro Record (TradingSignalMessage) has attribute-style access
+            if hasattr(raw, 'symbol') and hasattr(raw, 'signal_type'):
+                symbol = getattr(raw, 'symbol', None)
+                sig_type = str(getattr(raw, 'signal_type', '') or '').upper()
+                confidence = float(getattr(raw, 'confidence', 0.0) or 0.0)
+                strategy_name = getattr(raw, 'strategy_name', None)
+                ts = getattr(raw, 'timestamp', None)
+                reasoning = str(getattr(raw, 'reasoning', '') or '')
+
+                # Parse size from reasoning e.g. "... size=0.0420 ..."
+                size = 0.0
+                try:
+                    if 'size=' in reasoning:
+                        after = reasoning.split('size=', 1)[1]
+                        num = ''
+                        for ch in after:
+                            if ch in '0123456789.+-eE':
+                                num += ch
+                            else:
+                                break
+                        size = float(num) if num else 0.0
+                except Exception:
+                    size = 0.0
+                if size <= 0.0:
+                    # Derive conservative size from confidence (1%-10%)
+                    size = max(0.01, min(0.1, 0.02 + 0.08 * confidence))
+
+                action = 'BUY' if sig_type == 'BUY' else ('SELL' if sig_type == 'SELL' else 'HOLD')
+                return {
+                    'symbol': symbol,
+                    'recommended_action': action,
+                    'position_size': size,
+                    'confidence': confidence,
+                    'strategy_name': strategy_name,
+                    'timestamp': ts,
+                }
+
+            # Dict-like
+            if isinstance(raw, dict):
+                # Map signal_type -> recommended_action if needed
+                if 'recommended_action' not in raw and 'signal_type' in raw:
+                    st = str(raw.get('signal_type') or '').upper()
+                    raw['recommended_action'] = 'BUY' if st == 'BUY' else ('SELL' if st == 'SELL' else 'HOLD')
+                # Accept both position_percent and position_size
+                if 'position_size' not in raw:
+                    if 'position_percent' in raw:
+                        try:
+                            raw['position_size'] = float(raw['position_percent'])
+                        except Exception:
+                            raw['position_size'] = 0.0
+                    else:
+                        conf = float(raw.get('confidence', 0.0) or 0.0)
+                        raw['position_size'] = max(0.01, min(0.1, 0.02 + 0.08 * conf))
+                return raw
+        except Exception as e:
+            logger.debug(f"signal.normalize.failed err={e}")
+        # Fallback minimal HOLD
+        return {'recommended_action': 'HOLD', 'symbol': None, 'position_size': 0.0, 'confidence': 0.0}
     
     async def _process_position_queue(self):
         """Process position updates for portfolio risk monitoring."""
@@ -602,9 +863,8 @@ class RiskMonitoringService:
             }
     
     async def _calculate_portfolio_risk(self, position_data: Dict[str, Any]) -> PortfolioRisk:
-        """Calculate overall portfolio risk metrics."""
+        """Calculate overall portfolio risk metrics using advanced methods."""
         try:
-            # Simplified portfolio risk calculation
             total_risk_score = 0.0
             high_risk_positions = []
             active_alerts = len([a for a in self.active_alerts.values() 
@@ -614,6 +874,10 @@ class RiskMonitoringService:
             total_value = position_data.get('total_value', 1.0)
             positions = position_data.get('positions', {})
             
+            # Collect returns for VaR/CVaR calculation
+            portfolio_returns = []
+            returns_dict = {}
+            
             for symbol, position in positions.items():
                 if symbol in self.symbol_metrics:
                     risk_metrics = self.symbol_metrics[symbol]
@@ -622,6 +886,52 @@ class RiskMonitoringService:
                     
                     if risk_metrics.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]:
                         high_risk_positions.append(symbol)
+                    
+                    # Collect historical returns for this symbol
+                    if symbol in self.price_history and len(self.price_history[symbol]) > 1:
+                        prices = [p['price'] for p in self.price_history[symbol]]
+                        returns = np.diff(prices) / prices[:-1]
+                        returns_dict[symbol] = returns
+                        portfolio_returns.extend(returns * weight)
+            
+            # Convert to numpy array for calculations
+            portfolio_returns = np.array(portfolio_returns) if portfolio_returns else np.array([0.0])
+            
+            # Calculate advanced risk metrics
+            var_1d = AdvancedRiskCalculator.calculate_var(
+                portfolio_returns, 
+                confidence_level=self.risk_params.get('var_confidence', 0.95),
+                method='monte_carlo'
+            )
+            
+            cvar_1d = AdvancedRiskCalculator.calculate_cvar(
+                portfolio_returns,
+                confidence_level=self.risk_params.get('var_confidence', 0.95)
+            )
+            
+            max_drawdown = AdvancedRiskCalculator.calculate_max_drawdown(portfolio_returns)
+            
+            # Calculate correlation risk
+            correlation_risk = 0.5  # Default
+            if len(returns_dict) > 1:
+                corr_matrix = AdvancedRiskCalculator.calculate_correlation_matrix(returns_dict)
+                # High correlation means higher risk (less diversification)
+                avg_correlation = (np.sum(np.abs(corr_matrix)) - len(corr_matrix)) / (len(corr_matrix) * (len(corr_matrix) - 1))
+                correlation_risk = avg_correlation
+            
+            # Calculate concentration risk (Herfindahl Index)
+            concentration_risk = 0.0
+            if positions:
+                weights = [position.get('value', 0) / total_value for position in positions.values()]
+                concentration_risk = sum(w**2 for w in weights)  # HHI
+            
+            # Adjust total risk score based on advanced metrics
+            if var_1d > 0.05:  # 5% VaR threshold
+                total_risk_score += 20
+            if cvar_1d > 0.075:  # 7.5% CVaR threshold
+                total_risk_score += 15
+            if abs(max_drawdown) > self.risk_params['max_portfolio_drawdown']:
+                total_risk_score += 25
             
             # Determine overall risk level
             if total_risk_score >= 70:
@@ -633,14 +943,17 @@ class RiskMonitoringService:
             else:
                 risk_level = RiskLevel.LOW
             
+            # Log advanced metrics
+            logger.info(f"Portfolio Risk - VaR: {var_1d:.4f}, CVaR: {cvar_1d:.4f}, MaxDD: {max_drawdown:.4f}")
+            
             return PortfolioRisk(
                 timestamp=datetime.utcnow(),
                 total_risk_score=total_risk_score,
                 risk_level=risk_level,
-                var_1d=total_risk_score * 0.01,  # Simplified VaR calculation
-                max_drawdown=0.02,  # Would calculate from historical data
-                concentration_risk=len(positions) / 10.0 if positions else 0.0,
-                correlation_risk=0.5,  # Would calculate from correlations
+                var_1d=var_1d,
+                max_drawdown=max_drawdown,
+                concentration_risk=concentration_risk,
+                correlation_risk=correlation_risk,
                 active_alerts=active_alerts,
                 high_risk_positions=high_risk_positions
             )
@@ -709,9 +1022,10 @@ class RiskMonitoringService:
                     'severity_score': alert.severity_score,
                     'timestamp': alert.timestamp.isoformat()
                 }
-                
-                # Would publish to risk alerts topic
-                logger.debug(f"Publishing risk alert: {alert.title}")
+                try:
+                    await self.producer.send_risk_alert(alert_message)
+                except Exception as e:
+                    logger.debug(f"Risk alert publish failed: {e}")
                 
         except Exception as e:
             logger.warning(f"Failed to publish risk alert: {e}")
@@ -720,6 +1034,7 @@ class RiskMonitoringService:
         """Perform periodic comprehensive risk assessment."""
         while self.is_running:
             try:
+                start_ts = datetime.utcnow()
                 await asyncio.sleep(300)  # Every 5 minutes
                 
                 # Review all active symbols for risk
@@ -742,7 +1057,19 @@ class RiskMonitoringService:
                     if not self.price_history[symbol]:
                         del self.price_history[symbol]
                 
+                # Record loop latency
+                if self._risk_eval_latency:
+                    try:
+                        elapsed = (datetime.utcnow() - start_ts).total_seconds()
+                        self._risk_eval_latency.observe(max(0.0, elapsed))
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception as e:
+                if self._risk_eval_errors:
+                    try:
+                        self._risk_eval_errors.inc()
+                    except Exception:  # noqa: BLE001
+                        pass
                 logger.warning(f"Periodic risk assessment error: {e}")
     
     async def _alert_cleanup(self):

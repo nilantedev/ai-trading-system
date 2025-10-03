@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional, Callable, AsyncGenerator
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 
 from .models import MarketData, NewsEvent, TechnicalIndicator, OptionsData
@@ -16,15 +17,27 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
+class IngestionErrorType(str, Enum):  # string Enum for easy JSON / label usage
+    NETWORK = "network"
+    RATE_LIMIT = "rate_limit"
+    AUTH = "auth"
+    PARSE = "parse"
+    DATA_QUALITY = "data_quality"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class IngestionMetrics:
-    """Metrics for data ingestion monitoring."""
+    """Metrics for data ingestion monitoring (in-memory aggregate + Prometheus bridge)."""
     records_processed: int = 0
     records_success: int = 0
     records_failed: int = 0
     processing_time_ms: float = 0
     last_update: datetime = field(default_factory=datetime.utcnow)
     error_messages: List[str] = field(default_factory=list)
+    error_type_counts: Dict[str, int] = field(default_factory=dict)
+    last_success_timestamp: Optional[datetime] = None
     
     @property
     def success_rate(self) -> float:
@@ -39,6 +52,89 @@ class IngestionMetrics:
         if self.processing_time_ms == 0:
             return 0.0
         return (self.records_processed / self.processing_time_ms) * 1000
+
+    def record_error(self, err_type: IngestionErrorType, message: str):
+        self.error_type_counts[err_type.value] = self.error_type_counts.get(err_type.value, 0) + 1
+        # Keep only last 50 error messages to bound memory
+        self.error_messages.append(message)
+        if len(self.error_messages) > 50:
+            self.error_messages = self.error_messages[-50:]
+
+    def record_success(self):
+        self.last_success_timestamp = datetime.utcnow()
+
+
+# ---------------- Prometheus instrumentation (lazy import safe) ---------------- #
+try:  # Guard so core ingestion logic works even without prometheus_client available
+    from prometheus_client import Counter as _PCounter, Gauge as _PGauge
+    _INGEST_ERRORS = _PCounter(
+        'ingestion_errors_total',
+        'Total ingestion errors classified by pipeline and type',
+        ['pipeline', 'type']
+    )
+    _INGEST_RECORDS = _PCounter(
+        'ingestion_records_total',
+        'Total records processed by pipeline and result',
+        ['pipeline', 'result']  # result: success|failed
+    )
+    _INGEST_LAST_SUCCESS = _PGauge(
+        'ingestion_last_success_timestamp',
+        'Unix epoch seconds of last successful record for pipeline',
+        ['pipeline']
+    )
+except Exception:  # noqa: BLE001
+    _INGEST_ERRORS = None
+    _INGEST_RECORDS = None
+    _INGEST_LAST_SUCCESS = None
+
+
+def classify_exception(exc: Exception) -> IngestionErrorType:
+    """Best-effort classification of an ingestion exception into a stable taxonomy.
+
+    This keeps provider-specific nuances out of metric cardinality. Uses simple
+    substring heuristics; safe to expand over time. Always returns a value.
+    """
+    msg = str(exc).lower()
+    if any(k in msg for k in ("timeout", "temporarily unavailable", "connection reset", "dns")):
+        return IngestionErrorType.NETWORK
+    if 'rate limit' in msg or '429' in msg or 'too many requests' in msg:
+        return IngestionErrorType.RATE_LIMIT
+    if 'unauthorized' in msg or 'forbidden' in msg or 'auth' in msg or 'signature' in msg:
+        return IngestionErrorType.AUTH
+    if 'parse' in msg or 'jsondecodeerror' in msg or 'invalid literal' in msg:
+        return IngestionErrorType.PARSE
+    if 'stale' in msg or 'old data' in msg:
+        return IngestionErrorType.STALE
+    if 'quality' in msg or 'validation' in msg:
+        return IngestionErrorType.DATA_QUALITY
+    return IngestionErrorType.UNKNOWN
+
+
+def _prom_record_error(pipeline: str, err_type: IngestionErrorType):  # pragma: no cover - metrics side-effect
+    if _INGEST_ERRORS is None:
+        return
+    try:
+        _INGEST_ERRORS.labels(pipeline=pipeline, type=err_type.value).inc()
+    except Exception:
+        pass
+
+
+def _prom_record_result(pipeline: str, success: bool, count: int):  # pragma: no cover
+    if _INGEST_RECORDS is None:
+        return
+    try:
+        _INGEST_RECORDS.labels(pipeline=pipeline, result='success' if success else 'failed').inc(count)
+    except Exception:
+        pass
+
+
+def _prom_record_last_success(pipeline: str):  # pragma: no cover
+    if _INGEST_LAST_SUCCESS is None:
+        return
+    try:
+        _INGEST_LAST_SUCCESS.labels(pipeline=pipeline).set(datetime.utcnow().timestamp())
+    except Exception:
+        pass
 
 
 class DataIngestionBase(ABC):
@@ -85,8 +181,10 @@ class DataIngestionBase(ABC):
         self._error_callbacks.append(callback)
     
     async def _handle_error(self, error: Exception):
-        """Handle pipeline errors."""
-        self.metrics.error_messages.append(str(error))
+        """Handle pipeline errors (classification + callbacks)."""
+        err_type = classify_exception(error)
+        self.metrics.record_error(err_type, str(error))
+        _prom_record_error(self.name, err_type)
         for callback in self._error_callbacks:
             try:
                 await callback(error, self)
@@ -110,7 +208,9 @@ class DataIngestionBase(ABC):
             'throughput_per_second': self.metrics.throughput_per_second,
             'processing_time_ms': self.metrics.processing_time_ms,
             'last_update': self.metrics.last_update.isoformat(),
-            'recent_errors': self.metrics.error_messages[-5:]  # Last 5 errors
+            'recent_errors': self.metrics.error_messages[-5:],  # Last 5 errors
+            'error_types': self.metrics.error_type_counts,
+            'last_success_timestamp': self.metrics.last_success_timestamp.isoformat() if self.metrics.last_success_timestamp else None,
         }
 
 
@@ -148,21 +248,25 @@ class MarketDataIngestion(DataIngestionBase):
                         
                         # Cache latest data
                         await self.cache.cache_market_data(market_data, self.timeframe)
+                        self.metrics.records_success += 1
+                        self.metrics.record_success()
+                        _prom_record_result(self.name, True, 1)
                     
                 except Exception as e:
                     logger.error(f"Failed to fetch data for {symbol}: {e}")
                     self.metrics.records_failed += 1
+                    _prom_record_result(self.name, False, 1)
                     continue
             
             # Batch insert to database
             if batch_records:
                 try:
                     success_count = await self.questdb_ops.insert_market_data(batch_records)
-                    self.metrics.records_success += success_count
+                    # success_count already counted above per-record; keep insert diagnostic only
                     logger.debug(f"Inserted {success_count} market data records")
                 except Exception as e:
                     logger.error(f"Batch insert failed: {e}")
-                    self.metrics.records_failed += len(batch_records)
+                    # treat whole batch as failed persistence (do not double count processed)
             
             # Update metrics
             self.metrics.records_processed += len(batch_records)
@@ -228,6 +332,7 @@ class NewsIngestion(DataIngestionBase):
                 except Exception as e:
                     logger.error(f"Failed to fetch news from {source}: {e}")
                     self.metrics.records_failed += 1
+                    _prom_record_result(self.name, False, 1)
                     continue
             
             # Process and store news
@@ -240,10 +345,13 @@ class NewsIngestion(DataIngestionBase):
                     # await self.questdb_ops.insert_news_event(news_item)
                     
                     self.metrics.records_success += 1
+                    self.metrics.record_success()
+                    _prom_record_result(self.name, True, 1)
                     
                 except Exception as e:
                     logger.error(f"Failed to process news item: {e}")
                     self.metrics.records_failed += 1
+                    _prom_record_result(self.name, False, 1)
             
             # Update metrics
             self.metrics.records_processed += len(news_records)
@@ -327,10 +435,13 @@ class TechnicalIndicatorIngestion(DataIngestionBase):
                                 )
                                 
                                 self.metrics.records_success += 1
+                                self.metrics.record_success()
+                                _prom_record_result(self.name, True, 1)
                             
                         except Exception as e:
                             logger.error(f"Indicator calculation failed for {symbol} {indicator}: {e}")
                             self.metrics.records_failed += 1
+                            _prom_record_result(self.name, False, 1)
             
             # Update metrics
             processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000

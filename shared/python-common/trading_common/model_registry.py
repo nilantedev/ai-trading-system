@@ -11,9 +11,9 @@ from typing import Optional, Dict, Any, List
 
 # NOTE: get_database import path may differ; using local lazy import wrapper to avoid attribute errors.
 try:  # narrow to ImportError only
-    from .database_manager import get_database_manager as get_database  # type: ignore[attr-defined]
+    from .database_manager import get_database_manager  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - fallback placeholder
-    async def get_database():  # type: ignore
+    async def get_database_manager():  # type: ignore
         raise RuntimeError("get_database import failed; provide trading_common.database_manager.get_database_manager")
 
 class ModelState(str, Enum):
@@ -59,12 +59,14 @@ class PromotionError(Exception):
 
 class ModelRegistry:
     def __init__(self):
-        self.db = None
+        self.dbm = None
 
     async def initialize(self):
-        self.db = await get_database()
-        # Extend existing table if needed
-        await self.db.execute("""
+        self.dbm = await get_database_manager()
+        # Extend existing table if needed (Postgres)
+        async with self.dbm.get_postgres() as sess:  # type: ignore[attr-defined]
+            from sqlalchemy import text as _sql_text  # type: ignore
+            await sess.execute(_sql_text("""
         CREATE TABLE IF NOT EXISTS model_registry (
             model_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
             model_name VARCHAR(255) NOT NULL,
@@ -85,8 +87,8 @@ class ModelRegistry:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(model_name, version)
         )
-        """)
-        await self.db.execute("""
+        """))
+            await sess.execute(_sql_text("""
         CREATE TABLE IF NOT EXISTS model_drift_reports (
             id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
             model_name VARCHAR(255) NOT NULL,
@@ -98,10 +100,11 @@ class ModelRegistry:
             reference_period JSON,
             live_period JSON
         )
-        """)
+        """))
 
     async def upsert_entry(self, entry: RegistryEntry):
-        await self.db.execute("""
+        async with self.dbm.get_postgres() as sess:  # type: ignore[attr-defined]
+            await sess.execute("""
         INSERT INTO model_registry
         (model_name, model_type, version, state, config, training_metrics, artifact_path,
          dataset_hash, feature_graph_hash, training_config_hash, git_commit, promotion_history,
@@ -143,7 +146,8 @@ class ModelRegistry:
             q += " AND version = %s"
             params.append(version)
         q += " ORDER BY created_at DESC LIMIT 1"
-        row = await self.db.fetch_one(q, params)
+        async with self.dbm.get_postgres() as sess:  # type: ignore[attr-defined]
+            row = await sess.fetch_one(q, params)
         if not row:
             return None
         return self._row_to_entry(row)

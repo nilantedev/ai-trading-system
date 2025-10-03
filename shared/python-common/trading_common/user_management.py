@@ -8,12 +8,23 @@ import asyncio
 import hashlib
 import secrets
 import uuid
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 import json
 import logging
+from pathlib import Path
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+except ImportError:
+    pass
 
 try:
     import asyncpg
@@ -206,10 +217,48 @@ class UserManager:
     def _init_database(self):
         """Initialize database connection and tables."""
         try:
-            # Get database URL from settings
-            db_url = self.settings.postgres_url or self.settings.database_url
+            # Get database URL from settings or build from components
+            db_url = getattr(self.settings.database, 'postgres_url', None)
+            
             if not db_url:
-                db_url = "postgresql://trading_user:trading_password@localhost:5432/trading_db"
+                # Build URL from individual components
+                import os
+                db_user = (
+                    getattr(self.settings.database, 'postgres_user', None) or
+                    os.getenv('DB_USER') or
+                    os.getenv('DB_POSTGRES_USER') or
+                    'trading_user'
+                )
+                db_password = (
+                    getattr(self.settings.database, 'postgres_password', None) or
+                    os.getenv('DB_PASSWORD') or
+                    os.getenv('DB_POSTGRES_PASSWORD')
+                )
+                db_host = (
+                    getattr(self.settings.database, 'postgres_host', None) or
+                    os.getenv('DB_HOST') or
+                    os.getenv('DB_POSTGRES_HOST') or
+                    'localhost'
+                )
+                db_port = (
+                    getattr(self.settings.database, 'postgres_port', None) or
+                    os.getenv('DB_PORT') or
+                    os.getenv('DB_POSTGRES_PORT') or
+                    5432
+                )
+                db_name = (
+                    getattr(self.settings.database, 'postgres_database', None) or
+                    os.getenv('DB_NAME') or
+                    os.getenv('DB_POSTGRES_DATABASE') or
+                    'trading_db'
+                )
+                
+                if db_password:
+                    db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+                    logger.debug(f"Database URL built: {db_user}@{db_host}:{db_port}/{db_name}")
+                else:
+                    logger.warning("No database password found in settings or environment")
+                    db_url = f"postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
             
             # Ensure async URL format
             if "postgresql://" in db_url:
@@ -277,6 +326,7 @@ class UserManager:
             # Log security event
             await log_security_event(
                 event_type=SecurityEventType.USER_CREATED,
+                success=True,
                 user_id=user.user_id,
                 details={
                     'username': username,
@@ -381,8 +431,8 @@ class UserManager:
             # Log session creation
             await log_security_event(
                 event_type=SecurityEventType.SESSION_CREATED,
+                success=True,
                 user_id=user.user_id,
-                session_id=session.session_id,
                 details={
                     'username': user.username,
                     'is_api': is_api,
@@ -440,7 +490,7 @@ class UserManager:
             
             await log_security_event(
                 event_type=SecurityEventType.SESSION_INVALIDATED,
-                session_id=session_id,
+                success=True,
                 details={'reason': 'explicit_invalidation'}
             )
             
@@ -482,6 +532,7 @@ class UserManager:
             # Log security event
             await log_security_event(
                 event_type=SecurityEventType.PASSWORD_CHANGED,
+                success=True,
                 user_id=user_id,
                 details={'username': user.username}
             )
@@ -509,6 +560,7 @@ class UserManager:
             # Log security event
             await log_security_event(
                 event_type=SecurityEventType.ROLE_CHANGED,
+                success=True,
                 user_id=user_id,
                 details={
                     'username': user.username,
@@ -741,6 +793,7 @@ class UserManager:
         
         await log_security_event(
             event_type=SecurityEventType.LOGIN_FAILED,
+            success=False,
             user_id=user.user_id,
             details={
                 'username': user.username,
@@ -764,6 +817,7 @@ class UserManager:
         
         await log_security_event(
             event_type=SecurityEventType.LOGIN_SUCCESSFUL,
+            success=True,
             user_id=user.user_id,
             details={
                 'username': user.username,
@@ -775,6 +829,7 @@ class UserManager:
         """Log failed login attempt."""
         await log_security_event(
             event_type=SecurityEventType.LOGIN_FAILED,
+            success=False,
             details={
                 'username': username,
                 'ip_address': ip_address,

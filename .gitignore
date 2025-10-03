@@ -290,6 +290,12 @@ data/*.json
 models/*.pkl
 models/*.h5
 
+# Archive and temporary directories
+archive/
+artifacts/
+data_markers/
+backtest-results/
+
 # Logs
 logs/
 *.log

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 39,
+  "title": "Options Ingestion & Coverage",
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Option Aggregate Fetch Attempts (rate by result)",
+      "id": 1,
+      "gridPos": {"x":0,"y":0,"w":12,"h":6},
+      "targets": [
+        {"expr": "sum by (result) (rate(options_aggs_fetch_total[5m]))", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Empty Fetch Ratio (5m)",
+      "id": 2,
+      "gridPos": {"x":12,"y":0,"w":6,"h":6},
+      "targets": [
+        {"expr": "(sum(rate(options_aggs_fetch_total{result=\"empty\"}[5m])) / clamp_min(sum(rate(options_aggs_fetch_total[5m])),1))", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2}}
+    },
+    {
+      "type": "stat",
+      "title": "Error Fetch Ratio (5m)",
+      "id": 3,
+      "gridPos": {"x":18,"y":0,"w":6,"h":6},
+      "targets": [
+        {"expr": "(sum(rate(options_aggs_fetch_total{result=\"error\"}[5m])) / clamp_min(sum(rate(options_aggs_fetch_total[5m])),1))", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Aggregate Fetch Latency p95",
+      "id": 4,
+      "gridPos": {"x":0,"y":6,"w":12,"h":6},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(options_aggs_fetch_latency_seconds_bucket[5m])))", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "stat",
+      "title": "Rows per Contract (since start)",
+      "id": 5,
+      "gridPos": {"x":12,"y":6,"w":6,"h":6},
+      "targets": [
+        {"expr": "options_aggs_rows_total / clamp_min(sum(options_backfill_contracts_total),1)", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"decimals": 2}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Contracts Processed (rate by path)",
+      "id": 6,
+      "gridPos": {"x":18,"y":6,"w":6,"h":6},
+      "targets": [
+        {"expr": "sum by (path) (rate(options_backfill_contracts_total[5m]))", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total Bars Ingested (options)",
+      "id": 7,
+      "gridPos": {"x":0,"y":12,"w":6,"h":5},
+      "targets": [
+        {"expr": "sum(options_backfill_bars_total)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total Option Contracts Processed",
+      "id": 8,
+      "gridPos": {"x":6,"y":12,"w":6,"h":5},
+      "targets": [
+        {"expr": "sum(options_backfill_contracts_total)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Backfill Bars vs Contracts (cumulative)",
+      "id": 9,
+      "gridPos": {"x":12,"y":12,"w":12,"h":5},
+      "targets": [
+        {"expr": "sum(options_backfill_bars_total)", "refId": "A"},
+        {"expr": "sum(options_backfill_contracts_total)", "refId": "B"}
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Recent Option Coverage (API export)",
+      "id": 10,
+      "gridPos": {"x":0,"y":17,"w":24,"h":8},
+      "options": {"showHeader": true},
+      "targets": [
+        {"expr": "0", "refId": "A"}
+      ],
+      "description": "Data source: options_coverage.json exported; integrate via CSV/JSON datasource externally if configured."
+    }
+  ],
+  "templating": {"list": []}
+}

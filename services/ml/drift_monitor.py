@@ -343,3 +343,26 @@ class DriftMonitor:
             "baseline_features": list(self.baseline_stats.keys()),
             "monitoring_status": "active" if self.baseline_stats else "not_initialized"
         }
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get drift monitor status for health checks."""
+        recent_alerts = [a for a in self.alerts if a.timestamp > datetime.now() - timedelta(days=1)]
+        has_critical = any(a.severity == DriftSeverity.CRITICAL for a in recent_alerts)
+        
+        return {
+            "model_id": self.model_id,
+            "initialized": bool(self.baseline_stats),
+            "alerts_24h": len(recent_alerts),
+            "has_critical_alerts": has_critical,
+            "monitoring_active": bool(self.baseline_stats)
+        }
+    
+    async def check_all_models(self):
+        """Check all models for drift (stub for compatibility)."""
+        # This would check multiple models in a real implementation
+        return {
+            "drift_detected": len(self.alerts) > 0,
+            "affected_models": [self.model_id] if self.alerts else [],
+            "severity": "critical" if any(a.severity == DriftSeverity.CRITICAL for a in self.alerts) else "normal",
+            "recommendations": ["Review model performance"] if self.alerts else []
+        }

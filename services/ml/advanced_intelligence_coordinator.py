@@ -15,7 +15,12 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import MarketData, get_settings, get_logger
+from trading_common.database_manager import get_database_manager
 from trading_common.cache import get_trading_cache
 
 # Import our advanced models
@@ -343,6 +348,73 @@ class AdvancedIntelligenceCoordinator:
         logger.info(f"Generated {len(signals)} advanced signals")
         
         return signals
+
+    async def generate_signals(self, symbols: List[str], strategies: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """Compatibility wrapper used by ml/main.py to generate signals without pre-fetched data.
+
+        This method pulls recent market data from QuestDB for each symbol, then calls
+        generate_advanced_signals() and returns a JSON-serializable structure.
+        """
+        # Fetch recent OHLCV from QuestDB
+        market_data: Dict[str, List[MarketData]] = {}
+        try:
+            dbm = await get_database_manager()
+            async with dbm.get_questdb() as conn:
+                query = (
+                    "SELECT symbol, timestamp, open, high, low, close, volume, vwap, trade_count, data_source "
+                    "FROM market_data WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 500"
+                )
+                for sym in symbols:
+                    rows = await conn.fetch(query, sym)
+                    series = []
+                    for r in reversed(rows):  # chronological order
+                        try:
+                            series.append(MarketData(
+                                symbol=r["symbol"],
+                                timestamp=r["timestamp"],
+                                open=r["open"], high=r["high"], low=r["low"], close=r["close"],
+                                volume=int(r["volume"]) if r["volume"] is not None else 0,
+                                vwap=r["vwap"],
+                                trade_count=int(r["trade_count"]) if r["trade_count"] is not None else 0,
+                                data_source=r["data_source"] or "questdb"
+                            ))
+                        except Exception:
+                            continue
+                    if series:
+                        market_data[sym] = series
+        except Exception as e:
+            logger.warning(f"generate_signals: failed to fetch market data from QuestDB: {e}")
+
+        # If no data could be fetched, return empty
+        if not market_data:
+            return {}
+
+        # Delegate to core generator
+        adv = await self.generate_advanced_signals(symbols, market_data)
+
+        # Convert dataclasses to JSON-serializable dicts
+        out: Dict[str, Dict[str, Any]] = {}
+        for sym, sig in adv.items():
+            out[sym] = {
+                "timestamp": sig.timestamp.isoformat(),
+                "gnn_signal": sig.gnn_signal,
+                "factor_signal": sig.factor_signal,
+                "causality_signal": sig.causality_signal,
+                "volatility_signal": sig.volatility_signal,
+                "gnn_confidence": sig.gnn_confidence,
+                "factor_confidence": sig.factor_confidence,
+                "causality_confidence": sig.causality_confidence,
+                "volatility_confidence": sig.volatility_confidence,
+                "ensemble_signal": sig.ensemble_signal,
+                "ensemble_confidence": sig.ensemble_confidence,
+                "predicted_volatility": sig.predicted_volatility,
+                "var_95": sig.var_95,
+                "expected_return": sig.expected_return,
+                "optimal_holding_period": sig.optimal_holding_period,
+                "signal_attribution": sig.signal_attribution,
+                "risk_adjusted_signal": sig.get_risk_adjusted_signal(),
+            }
+        return out
     
     async def _perform_full_model_update(self, symbols: List[str],
                                        market_data: Dict[str, List[MarketData]],

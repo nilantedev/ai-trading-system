@@ -38,6 +38,10 @@ except ImportError:
     SKLEARN_AVAILABLE = False
 
 try:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+    
     from trading_common import get_logger, get_metrics_registry
     from trading_common.models import MarketData
     from trading_common.ml_registry import get_model_registry, ModelMetadata, ModelType, ModelStatus

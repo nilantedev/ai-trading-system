@@ -7,13 +7,44 @@ Analyzes markets from seconds to months for superior trading decisions
 import asyncio
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 import logging
-import talib
+try:
+    import talib  # type: ignore
+except Exception:  # ImportError or binary load errors
+    # Prefer absolute import (works when package is installed/executed as module)
+    try:
+        from services.ml.compat_talib import (  # type: ignore
+            RSI, EMA, SMA, MACD, STOCH, ROC, BBANDS, ATR, OBV, AD, ADX, AROON, MFI, CCI,
+        )
+    except Exception:
+        # When running as a script (python services/ml/main.py), sys.path[0] is services/ml
+        from compat_talib import (  # type: ignore
+            RSI, EMA, SMA, MACD, STOCH, ROC, BBANDS, ATR, OBV, AD, ADX, AROON, MFI, CCI,
+        )
+
+    # Create a lightweight namespace to mimic talib usage (e.g., talib.RSI(...))
+    class _CompatTalib:
+        RSI = staticmethod(RSI)
+        EMA = staticmethod(EMA)
+        SMA = staticmethod(SMA)
+        MACD = staticmethod(MACD)
+        STOCH = staticmethod(STOCH)
+        ROC = staticmethod(ROC)
+        BBANDS = staticmethod(BBANDS)
+        ATR = staticmethod(ATR)
+        OBV = staticmethod(OBV)
+        AD = staticmethod(AD)
+        ADX = staticmethod(ADX)
+        AROON = staticmethod(AROON)
+        MFI = staticmethod(MFI)
+        CCI = staticmethod(CCI)
+
+    talib = _CompatTalib()  # type: ignore
 from scipy import stats
 from sklearn.decomposition import PCA
 import warnings

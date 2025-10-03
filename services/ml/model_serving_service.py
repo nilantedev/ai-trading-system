@@ -23,6 +23,10 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import get_settings, get_logger, MarketData
 from trading_common.cache import get_trading_cache
 from trading_common.database import get_database

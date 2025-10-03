@@ -312,10 +312,22 @@ class BulkheadPool:
                 self.active_count += 1
             
             try:
+                # Support both async functions and sync callables that return awaitables
                 if asyncio.iscoroutinefunction(func):
                     result = await func(*args, **kwargs)
                 else:
                     result = func(*args, **kwargs)
+                    # If the callable returned an awaitable (e.g., lambda returning coroutine), await it
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    else:
+                        # Best-effort support for custom awaitables
+                        try:
+                            __await__ = getattr(result, "__await__", None)
+                            if callable(__await__):
+                                result = await result  # type: ignore[func-returns-value]
+                        except Exception:
+                            pass
                 return result
             finally:
                 async with self._lock:

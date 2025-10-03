@@ -8,11 +8,20 @@ import os
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Ensure shared python-common path is available for potential future models
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PY_COMMON = PROJECT_ROOT / 'shared' / 'python-common'
+if PY_COMMON.exists():
+    sys.path.insert(0, str(PY_COMMON))
 
-# Import your models
-from shared.python_common.trading_common.user_models import Base
+# Attempt to import SQLAlchemy Base if defined; fall back to empty metadata
+try:
+    # If a declarative Base is added later (e.g., trading_common.db.base: Base) adjust here
+    from sqlalchemy.orm import declarative_base  # type: ignore
+    Base = declarative_base()
+except Exception:  # pragma: no cover - safety fallback
+    from sqlalchemy.orm import declarative_base
+    Base = declarative_base()
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -21,7 +30,9 @@ config = context.config
 # Override database URL with environment variable if available
 database_url = os.getenv('DATABASE_URL')
 if database_url:
-    config.set_main_option('sqlalchemy.url', database_url)
+    # ConfigParser treats '%' as interpolation; escape to '%%' to preserve URL-encoded passwords
+    safe_url = database_url.replace('%', '%%')
+    config.set_main_option('sqlalchemy.url', safe_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

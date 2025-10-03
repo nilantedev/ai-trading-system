@@ -9,10 +9,119 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from enum import Enum
 import statistics
+import time
+from contextlib import asynccontextmanager
 
 from trading_common import MarketData, NewsItem, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 from trading_common.messaging import get_pulsar_client
+from prometheus_client import Counter
+
+# Minimal internal resilience helpers (to avoid missing external dependency)
+class BreakerState(Enum):
+    CLOSED = 'closed'
+    HALF_OPEN = 'half_open'
+    OPEN = 'open'
+
+
+class AsyncCircuitBreaker:
+    """Lightweight async circuit breaker with context manager semantics."""
+    def __init__(self, name: str, failure_threshold: int = 3, recovery_timeout: float = 30.0, success_threshold: int = 1):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
+        self._state = BreakerState.CLOSED
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_ts: Optional[float] = None
+        self._listeners: list = []
+
+    def add_state_listener(self, cb):
+        self._listeners.append(cb)
+
+    def _transition(self, new_state: BreakerState):
+        old = self._state
+        if old is new_state:
+            return
+        self._state = new_state
+        for fn in list(self._listeners):
+            try:
+                fn(old, new_state)
+            except Exception:  # noqa: BLE001
+                continue
+
+    def get_state(self):
+        return {
+            'state': self._state.value,
+            'failure_count': self._failure_count,
+            'success_count': self._success_count,
+        }
+
+    @asynccontextmanager
+    async def context(self):
+        now = time.monotonic()
+        if self._state is BreakerState.OPEN:
+            if self._last_failure_ts is None or (now - self._last_failure_ts) >= self.recovery_timeout:
+                self._transition(BreakerState.HALF_OPEN)
+                self._success_count = 0
+            else:
+                raise RuntimeError(f"Circuit breaker {self.name} is OPEN")
+        try:
+            yield
+        except Exception:
+            self._failure_count += 1
+            self._last_failure_ts = time.monotonic()
+            if self._state is BreakerState.HALF_OPEN:
+                self._transition(BreakerState.OPEN)
+                self._failure_count = 0
+                self._success_count = 0
+            elif self._state is BreakerState.CLOSED and self._failure_count >= self.failure_threshold:
+                self._transition(BreakerState.OPEN)
+                self._failure_count = 0
+            raise
+        else:
+            if self._state is BreakerState.HALF_OPEN:
+                self._success_count += 1
+                if self._success_count >= self.success_threshold:
+                    self._transition(BreakerState.CLOSED)
+                    self._failure_count = 0
+                    self._success_count = 0
+            elif self._state is BreakerState.CLOSED:
+                self._failure_count = 0
+
+
+class AdaptiveTokenBucket:
+    """Simple adaptive token bucket for send rate control."""
+    def __init__(self, rate: float, capacity: float):
+        self._rate = float(rate)
+        self._capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+
+    async def acquire(self, wait: bool = False) -> bool:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._last)
+        self._last = now
+        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        if wait:
+            deficit = 1.0 - self._tokens
+            await asyncio.sleep(deficit / max(self._rate, 1e-6))
+            self._tokens = max(0.0, self._tokens - 1.0)
+            return True
+        return False
+
+    def record_result(self, success: bool, latency: float):
+        if success:
+            self._rate = min(self._capacity, self._rate * (1.02 if latency < 0.2 else 1.0))
+        else:
+            self._rate = max(1.0, self._rate * 0.85)
+
+    def metrics_snapshot(self):
+        return {'rate': self._rate, 'tokens': self._tokens}
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -59,6 +168,56 @@ class DataValidationService:
         self.cache = None
         self.pulsar_client = None
         self.producer = None
+        # Pulsar error rate limiting
+        self._pulsar_error_tokens = 15
+        self._pulsar_error_last_refill = datetime.utcnow()
+        try:
+            self._pulsar_error_counter = Counter('pulsar_persistence_errors_total', 'Total Pulsar persistence or producer send errors')
+        except Exception:  # noqa: BLE001
+            self._pulsar_error_counter = None
+        # Resilience primitives for Pulsar publishing
+        self._pulsar_breaker = AsyncCircuitBreaker('pulsar_producer')
+        self._pulsar_bucket = AdaptiveTokenBucket(rate=20, capacity=60)  # Lower volume for validation events
+        # Metrics registration (best-effort; avoid duplication if already global)
+        from prometheus_client import Gauge, Counter as PCounter
+        try:
+            try:
+                self._cb_state_gauge = Gauge('circuit_breaker_state','Circuit breaker state (0=closed,1=half-open,2=open)',['service','breaker'])
+            except Exception:
+                self._cb_state_gauge = None
+            try:
+                self._cb_transitions = PCounter('circuit_breaker_transitions_total','Circuit breaker transitions',['service','breaker','from_state','to_state'])
+            except Exception:
+                self._cb_transitions = None
+            try:
+                self._bucket_rate_g = Gauge('adaptive_token_bucket_rate','Current adaptive token bucket rate',['service','bucket'])
+                self._bucket_tokens_g = Gauge('adaptive_token_bucket_tokens','Current available tokens in bucket',['service','bucket'])
+                self._bucket_rate_g.labels(service='data-validation', bucket='pulsar_producer').set(20)
+                self._bucket_tokens_g.labels(service='data-validation', bucket='pulsar_producer').set(60)
+            except Exception:
+                self._bucket_rate_g = None
+                self._bucket_tokens_g = None
+        except Exception:
+            self._cb_state_gauge = None
+            self._cb_transitions = None
+            self._bucket_rate_g = None
+            self._bucket_tokens_g = None
+        def _cb_listener(old, new):
+            mapping = {BreakerState.CLOSED:0, BreakerState.HALF_OPEN:1, BreakerState.OPEN:2}
+            if self._cb_state_gauge:
+                try:
+                    self._cb_state_gauge.labels(service='data-validation', breaker='pulsar_producer').set(mapping.get(new,0))
+                except Exception:
+                    pass
+            if self._cb_transitions:
+                try:
+                    self._cb_transitions.labels(service='data-validation', breaker='pulsar_producer', from_state=old.value, to_state=new.value).inc()
+                except Exception:
+                    pass
+        try:
+            self._pulsar_breaker.add_state_listener(_cb_listener)
+        except Exception:
+            pass
         
         # Validation rules configuration
         self.market_data_rules = {
@@ -83,18 +242,42 @@ class DataValidationService:
         logger.info("Starting Data Validation Service")
         
         # Initialize cache
-        self.cache = get_trading_cache()
+        try:
+            self.cache = await get_trading_cache()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to initialize trading cache (continuing without cache): %s", e)
+            self.cache = None
         
         # Initialize message producer
         try:
             self.pulsar_client = get_pulsar_client()
             self.producer = self.pulsar_client.create_producer(
-                topic='persistent://trading/development/data-quality',
+                topic='persistent://trading/production/data-quality',
                 producer_name='validation-service'
             )
             logger.info("Connected to message system")
         except Exception as e:
             logger.warning(f"Failed to connect to message system: {e}")
+
+    def _rate_limited_pulsar_error(self, msg: str, exc: Exception | None = None):
+        try:
+            now = datetime.utcnow()
+            elapsed = (now - self._pulsar_error_last_refill).total_seconds()
+            if elapsed >= 1:
+                refill = int(elapsed)
+                if refill:
+                    self._pulsar_error_tokens = min(15, self._pulsar_error_tokens + refill)
+                    self._pulsar_error_last_refill = now
+            if self._pulsar_error_tokens > 0:
+                self._pulsar_error_tokens -= 1
+                if exc:
+                    logger.warning(f"{msg}: {exc}")
+                else:
+                    logger.warning(msg)
+            elif now.second % 30 == 0:
+                logger.debug("Pulsar validation errors suppressed (rate limit)")
+        except Exception:  # noqa: BLE001
+            pass
     
     async def stop(self):
         """Cleanup service connections."""
@@ -582,9 +765,41 @@ class DataValidationService:
     
     async def _publish_quality_metrics(self, metrics: DataQualityMetrics):
         """Publish quality metrics to message stream."""
-        if self.producer:
+        if not self.producer:
+            return
+        allowed = await self._pulsar_bucket.acquire(wait=False)
+        if not allowed:
+            try:
+                self._pulsar_bucket.record_result(False, 0.0)
+            except Exception:
+                pass
+            return
+        start = datetime.utcnow().timestamp()
+        try:
             message = json.dumps(asdict(metrics), default=str)
-            self.producer.send(message.encode('utf-8'))
+            async with self._pulsar_breaker.context():
+                self.producer.send(message.encode('utf-8'))
+        except Exception as e:  # noqa: BLE001
+            if self._pulsar_error_counter:
+                try:
+                    self._pulsar_error_counter.inc()
+                except Exception:
+                    pass
+            try:
+                self._pulsar_bucket.record_result(False, max(0.0, datetime.utcnow().timestamp() - start))
+            except Exception:
+                pass
+            self._rate_limited_pulsar_error(f"Failed to publish data quality metrics: {e}")
+        else:
+            try:
+                self._pulsar_bucket.record_result(True, max(0.0, datetime.utcnow().timestamp() - start))
+                snap = self._pulsar_bucket.metrics_snapshot()
+                if self._bucket_rate_g:
+                    self._bucket_rate_g.labels(service='data-validation', bucket='pulsar_producer').set(snap['rate'])
+                if self._bucket_tokens_g:
+                    self._bucket_tokens_g.labels(service='data-validation', bucket='pulsar_producer').set(snap['tokens'])
+            except Exception:
+                pass
     
     async def get_service_health(self) -> Dict:
         """Get service health status."""

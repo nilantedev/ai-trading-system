@@ -13,12 +13,12 @@ from datetime import datetime, timedelta
 import logging
 from dataclasses import dataclass
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
-from sklearn.metrics import sharpe_ratio, sortino_ratio, calmar_ratio
 from sklearn.preprocessing import StandardScaler
 import optuna
 import mlflow
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import lightgbm as lgb
@@ -27,10 +27,39 @@ from catboost import CatBoostRegressor
 import warnings
 warnings.filterwarnings('ignore')
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import get_logger, get_settings
+from trading_common.database_manager import get_database_manager
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+
+def sharpe_ratio(returns, risk_free_rate=0):
+    """Calculate Sharpe ratio."""
+    excess_returns = returns - risk_free_rate
+    return np.mean(excess_returns) / np.std(excess_returns) if np.std(excess_returns) > 0 else 0
+
+
+def sortino_ratio(returns, risk_free_rate=0):
+    """Calculate Sortino ratio."""
+    excess_returns = returns - risk_free_rate
+    downside_returns = excess_returns[excess_returns < 0]
+    downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 0
+    return np.mean(excess_returns) / downside_std if downside_std > 0 else 0
+
+
+def calmar_ratio(returns):
+    """Calculate Calmar ratio."""
+    cumulative_returns = (1 + returns).cumprod()
+    running_max = cumulative_returns.expanding().max()
+    drawdown = (cumulative_returns - running_max) / running_max
+    max_drawdown = drawdown.min()
+    annual_return = returns.mean() * 252  # Assuming daily returns
+    return annual_return / abs(max_drawdown) if max_drawdown != 0 else 0
 
 
 @dataclass
@@ -213,6 +242,92 @@ class ModelTrainingPipeline:
             'params': best_params,
             'feature_importance': self.feature_importance[model_name]
         }
+
+    async def run_training_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """End-to-end training using QuestDB daily data.
+
+        Expected job keys (defaults in parentheses):
+          - model_name (required)
+          - model_type ('ensemble'|'gradient_boosting'|'deep_learning')
+          - task_type ('price_prediction' default)
+          - symbols (list[str], required)
+          - start_date (YYYY-MM-DD, default 5y ago)
+          - end_date (YYYY-MM-DD, default today)
+          - horizon_days (int, default 1) for next-day returns target
+          - features (list[str], optional; uses default feature set if missing)
+        """
+        model_name = str(job.get('model_name') or job.get('name') or 'model')
+        symbols: List[str] = [str(s).upper() for s in (job.get('symbols') or []) if str(s).strip()]
+        if not symbols:
+            raise ValueError('symbols list is required in training job')
+        # Configure pipeline type dynamically if provided
+        mt = job.get('model_type')
+        if isinstance(mt, str) and mt:
+            self.config.model_type = mt
+        tt = job.get('task_type')
+        if isinstance(tt, str) and tt:
+            self.config.task_type = tt
+
+        # Date window
+        today = datetime.utcnow().date()
+        default_start = datetime(today.year - 5, today.month, min(28, today.day))
+        try:
+            start_dt = datetime.strptime(job.get('start_date', ''), '%Y-%m-%d') if job.get('start_date') else default_start
+        except Exception:
+            start_dt = default_start
+        try:
+            end_dt = datetime.strptime(job.get('end_date', ''), '%Y-%m-%d') if job.get('end_date') else datetime(today.year, today.month, today.day)
+        except Exception:
+            end_dt = datetime(today.year, today.month, today.day)
+        horizon = int(job.get('horizon_days', 1) or 1)
+
+        # Fetch data from QuestDB (daily close at 16:00)
+        dbm = await get_database_manager()
+        async with dbm.get_questdb() as conn:
+            sql = (
+                "SELECT symbol, timestamp, open, high, low, close, volume FROM market_data "
+                "WHERE symbol = ANY($1::text[]) AND to_char(timestamp, 'HH24:MI:SS') = '16:00:00' "
+                "AND timestamp >= $2 AND timestamp < $3 ORDER BY symbol, timestamp"
+            )
+            rows = await conn.fetch(sql, symbols, start_dt, end_dt)
+
+        if not rows:
+            raise ValueError('No data returned from QuestDB for given window')
+
+        df = pd.DataFrame([dict(r) for r in rows])
+        # Ensure proper dtypes
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values(['symbol', 'timestamp']).reset_index(drop=True)
+
+        # Feature engineering per symbol
+        def _fe(group: pd.DataFrame) -> pd.DataFrame:
+            g = group.copy()
+            g['returns'] = g['close'].pct_change()
+            g['rsi14'] = _calculate_rsi(g['close'], period=14)
+            macd_line, macd_signal, macd_hist = _calculate_macd(g['close'])
+            g['macd_line'] = macd_line
+            g['macd_signal'] = macd_signal
+            bb_u, bb_l = _calculate_bollinger(g['close'])
+            g['bb_upper'] = bb_u
+            g['bb_lower'] = bb_l
+            g['realized_vol20'] = g['returns'].rolling(20).std().fillna(0.0)
+            # Target: forward return over horizon
+            g['target_return'] = g['close'].pct_change(periods=horizon).shift(-horizon)
+            return g
+
+        df = df.groupby('symbol', group_keys=False).apply(_fe)
+        # Drop rows without target
+        df = df.dropna(subset=['target_return']).reset_index(drop=True)
+
+        default_features = [
+            'rsi14','macd_line','macd_signal','bb_upper','bb_lower','realized_vol20',
+            'open','high','low','close','volume'
+        ]
+        features: List[str] = [str(f) for f in (job.get('features') or default_features)]
+        target = 'target_return'
+
+        result = await self.train_model(df, features, target, model_name)
+        return result
     
     async def _optimize_hyperparameters(
         self,
@@ -263,7 +378,7 @@ class ModelTrainingPipeline:
         """
         Prepare data with advanced feature engineering.
         """
-        # Feature engineering
+        # Feature engineering (idempotent; will only add missing engineered columns)
         data = self._engineer_features(data)
         
         # Handle missing values
@@ -285,22 +400,27 @@ class ModelTrainingPipeline:
         """
         Advanced feature engineering for trading.
         """
-        # Technical indicators
-        data['rsi'] = self._calculate_rsi(data['close'])
-        data['macd'] = self._calculate_macd(data['close'])
-        data['bb_upper'], data['bb_lower'] = self._calculate_bollinger(data['close'])
-        
-        # Market microstructure
-        data['volume_imbalance'] = self._calculate_volume_imbalance(data)
-        data['order_flow'] = self._calculate_order_flow(data)
-        
-        # Volatility features
-        data['realized_vol'] = data['returns'].rolling(20).std()
-        data['garch_vol'] = self._fit_garch(data['returns'])
-        
-        # Regime features
-        data['regime'] = self._detect_regime(data)
-        
+        # Only add features if missing to support pre-engineered inputs
+        series_close = data['close']
+        if 'rsi' not in data.columns and 'rsi14' not in data.columns:
+            data['rsi14'] = _calculate_rsi(series_close, period=14)
+        if 'macd_line' not in data.columns or 'macd_signal' not in data.columns:
+            macd_line, macd_signal, _ = _calculate_macd(series_close)
+            data['macd_line'] = macd_line
+            data['macd_signal'] = macd_signal
+        if 'bb_upper' not in data.columns or 'bb_lower' not in data.columns:
+            bb_u, bb_l = _calculate_bollinger(series_close)
+            data['bb_upper'] = bb_u
+            data['bb_lower'] = bb_l
+        if 'returns' not in data.columns:
+            data['returns'] = data['close'].pct_change()
+        if 'realized_vol20' not in data.columns:
+            data['realized_vol20'] = data['returns'].rolling(20).std()
+        # Lightweight microstructure placeholders (avoid dependencies on tick data)
+        if 'volume_imbalance' not in data.columns:
+            data['volume_imbalance'] = _calculate_volume_imbalance(data)
+        if 'order_flow' not in data.columns:
+            data['order_flow'] = _calculate_order_flow(data)
         return data
     
     def _train_final_model(
@@ -568,3 +688,47 @@ async def get_training_pipeline() -> ModelTrainingPipeline:
         )
         _training_pipeline = ModelTrainingPipeline(config)
     return _training_pipeline
+
+# --- Technical Indicator Helpers (local, vectorized) ---
+
+def _calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    close = close.astype(float)
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(method='bfill').fillna(50.0)
+
+def _calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    close = close.astype(float)
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line.fillna(0.0), signal_line.fillna(0.0), hist.fillna(0.0)
+
+def _calculate_bollinger(close: pd.Series, window: int = 20, num_std: float = 2.0) -> Tuple[pd.Series, pd.Series]:
+    close = close.astype(float)
+    ma = close.rolling(window=window, min_periods=window).mean()
+    sd = close.rolling(window=window, min_periods=window).std()
+    upper = (ma + num_std * sd).fillna(method='bfill')
+    lower = (ma - num_std * sd).fillna(method='bfill')
+    return upper, lower
+
+def _calculate_volume_imbalance(df: pd.DataFrame) -> pd.Series:
+    # Simple heuristic: (volume - rolling median) / rolling median
+    vol = df['volume'].astype(float)
+    med = vol.rolling(10, min_periods=3).median()
+    out = (vol - med) / (med.replace(0, np.nan))
+    return out.fillna(0.0)
+
+def _calculate_order_flow(df: pd.DataFrame) -> pd.Series:
+    # Proxy using candle direction and range
+    rng = (df['high'].astype(float) - df['low'].astype(float)).replace(0, np.nan)
+    dirn = np.sign(df['close'].astype(float) - df['open'].astype(float))
+    of = (dirn * (df['close'].astype(float) - df['open'].astype(float)).abs()) / rng
+    return of.replace([np.inf, -np.inf], 0.0).fillna(0.0)

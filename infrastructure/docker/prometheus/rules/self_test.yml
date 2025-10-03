@@ -1,0 +1,12 @@
+groups:
+  - name: self-test
+    rules:
+      - record: example:vector_up
+        expr: up
+      - alert: PrometheusConfigOK
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: Prometheus rules loaded successfully

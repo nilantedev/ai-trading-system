@@ -1,0 +1,21 @@
+groups:
+  - name: pulsar-resilience
+    interval: 30s
+    rules:
+      - alert: PulsarProducerErrorsSpike
+        expr: increase(pulsar_producer_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pulsar producer errors spike"
+          description: ">10 producer errors in 5m. Check Pulsar broker logs and network connectivity."
+
+      - alert: PulsarProducerStall
+        expr: time() - pulsar_last_producer_success_timestamp_seconds > 300
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pulsar producer stalled"
+          description: "No successful producer send recorded in >5m. Downstream event pipelines likely impacted."

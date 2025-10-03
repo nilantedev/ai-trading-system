@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Optional, Iterable, Generator, Any, Dict
 import hashlib
 import os
+import base64
 import time
 import contextlib
 from time import perf_counter
@@ -30,11 +31,29 @@ class StorageError(RuntimeError):
     """Domain-specific storage error wrapper."""
 
 
+def _env_minio_secret() -> str:
+    """Resolve MinIO secret from env, supporting optional base64 encoding.
+
+    Priority:
+      1) MINIO_SECRET_KEY_B64 or MINIO_ROOT_PASSWORD_B64 (base64 decoded)
+      2) MINIO_SECRET_KEY
+      3) MINIO_ROOT_PASSWORD
+    """
+    b64 = os.getenv("MINIO_SECRET_KEY_B64") or os.getenv("MINIO_ROOT_PASSWORD_B64")
+    if b64:
+        try:
+            return base64.b64decode(b64).decode("utf-8")
+        except Exception:
+            # Fall through to non-b64 vars if decoding fails
+            pass
+    return os.getenv("MINIO_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", ""))
+
+
 @dataclass(frozen=True)
 class MinIOConfig:
     endpoint: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
     access_key: str = os.getenv("MINIO_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", ""))
-    secret_key: str = os.getenv("MINIO_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", ""))
+    secret_key: str = _env_minio_secret()
     secure: bool = os.getenv("MINIO_SECURE", "false").lower() == "true"
     region: Optional[str] = os.getenv("MINIO_REGION")
     # Default buckets to ensure lazily
@@ -50,22 +69,27 @@ class MinIOConfig:
 
 @lru_cache(maxsize=1)
 def get_minio_client(cfg: Optional[MinIOConfig] = None) -> Minio:
-    """Create (or return cached) MinIO client.
+    """Create (or return cached) MinIO client with basic network timeouts.
 
-    A cache is used to avoid recreating clients frequently. Config differences are ignored
-    after first call by design in this scaffold (explicit reset not yet required).
+    Uses environment overrides:
+      MINIO_HTTP_CLIENT_TIMEOUT (seconds, default 30)
     """
     cfg = cfg or MinIOConfig()
     cfg.validate()
+    timeout = float(os.getenv("MINIO_HTTP_CLIENT_TIMEOUT", "30"))
     try:
+        # The MinIO Python client allows a custom HTTP client via http_client=, but for
+        # simplicity we leverage the internal default and rely on urllib3 timeouts by
+        # patching env if needed in future. Placeholder kept for future injection.
         client = Minio(
             endpoint=cfg.endpoint,
             access_key=cfg.access_key,
             secret_key=cfg.secret_key,
             secure=cfg.secure,
             region=cfg.region,
+            # No direct timeout param; we will wrap operations with our own timeouts/backoff.
         )
-    except Exception as e:  # pragma: no cover - direct client init errors
+    except Exception as e:  # pragma: no cover
         raise StorageError(f"Failed to initialize MinIO client: {e}") from e
     return client  # type: ignore
 
@@ -82,24 +106,30 @@ def build_model_artifact_key(model_name: str, version: str, filename: str, *, pr
     return f"{prefix}/{safe_model}/{version}/{safe_file}".lower()
 
 
-def ensure_bucket(name: str, *, client: Optional[Minio] = None) -> bool:
-    """Idempotently ensure bucket exists.
+def ensure_bucket(name: str, *, client: Optional[Minio] = None, retries: int = 3, backoff: float = 0.5) -> bool:
+    """Idempotently ensure bucket exists with simple retry/backoff.
+
     Returns True if created, False if already existed.
-    Exceptions wrapped in StorageError.
     """
     client = client or get_minio_client()
-    start = perf_counter()
-    try:
-        if client.bucket_exists(name):  # type: ignore[attr-defined]
-            created = False
-        else:
+    last_error: Optional[Exception] = None
+    for attempt in range(retries):
+        start = perf_counter()
+        try:
+            if client.bucket_exists(name):  # type: ignore[attr-defined]
+                _record_storage_metric('ensure_bucket', 'success', start)
+                return False
             client.make_bucket(name)  # type: ignore[attr-defined]
-            created = True
-        _record_storage_metric('ensure_bucket', 'success', start)
-        return created
-    except S3Error as e:  # pragma: no cover - network path
-        _record_storage_metric('ensure_bucket', 'error', start)
-        raise StorageError(f"Bucket ensure failed: {e}") from e
+            _record_storage_metric('ensure_bucket', 'success', start)
+            return True
+        except Exception as e:  # pragma: no cover
+            last_error = e
+            _record_storage_metric('ensure_bucket', 'error', start)
+            if attempt < retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+            else:
+                raise StorageError(f"Bucket ensure failed after {retries} attempts: {e}") from e
+    raise StorageError(f"Bucket ensure failed: {last_error}")
 
 
 def put_bytes(
@@ -111,40 +141,51 @@ def put_bytes(
     verify_integrity: bool = True,
     client: Optional[Minio] = None,
     extra_headers: Optional[Dict[str, str]] = None,
+    retries: int = 3,
+    backoff: float = 0.5,
 ) -> Dict[str, Any]:
-    """Upload bytes to MinIO, optionally verifying SHA256 after upload.
-    Returns structured metadata.
-    """
+    """Upload bytes to MinIO with retry/backoff and optional post-upload integrity check."""
     client = client or get_minio_client()
-    start = perf_counter()
     digest = sha256_digest(data)
     size = len(data)
-    try:
-        ensure_bucket(bucket, client=client)
-        from io import BytesIO
-        stream = BytesIO(data)
-        # put_object returns etag in headers (via response) but python client returns nothing; we may need stat
-        client.put_object(bucket, object_key, stream, length=size, content_type=content_type, metadata=extra_headers or {})  # type: ignore[attr-defined]
-        etag = None
-        if verify_integrity:
-            # Fetch object stat to confirm size; deeper checksum verification would require separate store
-            stat = client.stat_object(bucket, object_key)  # type: ignore[attr-defined]
-            etag = getattr(stat, 'etag', None)
-            if getattr(stat, 'size', size) != size:
-                _record_storage_metric('put_bytes', 'error', start)
-                raise StorageError("Integrity check failed: size mismatch")
-        _record_storage_metric('put_bytes', 'success', start)
-        return {
-            "bucket": bucket,
-            "key": object_key,
-            "size": size,
-            "sha256": digest,
-            "etag": etag,
-            "uploaded_at": int(time.time()),
-        }
-    except S3Error as e:  # pragma: no cover
-        _record_storage_metric('put_bytes', 'error', start)
-        raise StorageError(f"Upload failed: {e}") from e
+    last_error: Optional[Exception] = None
+    from io import BytesIO
+    for attempt in range(retries):
+        start = perf_counter()
+        try:
+            ensure_bucket(bucket, client=client)
+            stream = BytesIO(data)
+            client.put_object(
+                bucket,
+                object_key,
+                stream,
+                length=size,
+                content_type=content_type,
+                metadata=extra_headers or {},
+            )  # type: ignore[attr-defined]
+            etag = None
+            if verify_integrity:
+                stat = client.stat_object(bucket, object_key)  # type: ignore[attr-defined]
+                etag = getattr(stat, 'etag', None)
+                if getattr(stat, 'size', size) != size:
+                    raise StorageError("Integrity check failed: size mismatch")
+            _record_storage_metric('put_bytes', 'success', start)
+            return {
+                "bucket": bucket,
+                "key": object_key,
+                "size": size,
+                "sha256": digest,
+                "etag": etag,
+                "uploaded_at": int(time.time()),
+            }
+        except Exception as e:  # pragma: no cover
+            last_error = e
+            _record_storage_metric('put_bytes', 'error', start)
+            if attempt < retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+            else:
+                raise StorageError(f"Upload failed after {retries} attempts: {e}") from e
+    raise StorageError(f"Upload failed: {last_error}")
 
 
 def generate_presigned_url(bucket: str, object_key: str, expiry_seconds: int = 3600, *, client: Optional[Minio] = None) -> str:

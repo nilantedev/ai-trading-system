@@ -106,7 +106,34 @@ class ProductionLLMService:
     
     def __init__(self, config_path: str = None):
         """Initialize the LLM service."""
-        self.config_path = config_path or "/home/nilante/main-nilante-server/ai-trading-system/infrastructure/ai-models/production-models.yaml"
+        # Try multiple possible config paths
+        # Allow environment overrides first
+        env_paths = [
+            os.getenv("MODEL_CONFIG_PATH"),
+            os.getenv("LLM_CONFIG_PATH"),
+        ]
+        possible_paths = [p for p in env_paths if p] + [
+            "/app/models/production-models.yaml",  # path as mounted by docker-compose
+            "/app/infrastructure/ai-models/production-models.yaml",
+            "/app/services/ml/production-models.yaml",
+            "./infrastructure/ai-models/production-models.yaml",
+            "infrastructure/ai-models/production-models.yaml",
+        ]
+        
+        if config_path:
+            possible_paths.insert(0, config_path)
+        
+        self.config_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                self.config_path = path
+                logger.info(f"Found config at: {path}")
+                break
+        
+        if not self.config_path:
+            logger.warning(f"No config file found in: {possible_paths}")
+            self.config_path = possible_paths[0]  # Use default for error messages
+        
         self.models: Dict[str, ModelConfig] = {}
         self.routing_table: Dict[AnalysisType, List[str]] = {}
         self.active_models: Dict[str, Any] = {}
@@ -123,57 +150,225 @@ class ProductionLLMService:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
             
-            # Load LLM configurations
-            for category in ['primary', 'specialized', 'cloud_backup']:
-                if category in config.get('llms', {}):
-                    for model_name, model_config in config['llms'][category].items():
-                        self.models[model_name] = ModelConfig(
-                            name=model_name,
-                            provider=ModelProvider(model_config.get('provider', 'local')),
-                            model_id=model_config.get('model', model_name),
-                            capabilities=model_config.get('capabilities', []),
-                            requirements=model_config.get('requirements', {}),
-                            quantization=model_config.get('quantization'),
-                            api_key=os.getenv(model_config.get('api_key', '').strip('${}'))
+            # Preferred: new production schema (models/model_overrides/routing_rules)
+            if 'models' in config or 'routing_rules' in config:
+                defaults = config.get('default_settings', {})
+                model_overrides = config.get('model_overrides', {})
+
+                def _apply_overrides(mc: ModelConfig) -> ModelConfig:
+                    ov = model_overrides.get(mc.model_id) or model_overrides.get(mc.name)
+                    if ov:
+                        mc.temperature = float(ov.get('temperature', mc.temperature))
+                        mc.max_tokens = int(ov.get('max_tokens', mc.max_tokens))
+                    # global defaults if not overridden
+                    if 'temperature' in defaults and mc.temperature == 0.7:
+                        try:
+                            mc.temperature = float(defaults['temperature'])
+                        except Exception:
+                            pass
+                    if 'max_tokens' in defaults and mc.max_tokens == 4096:
+                        try:
+                            mc.max_tokens = int(defaults['max_tokens'])
+                        except Exception:
+                            pass
+                    return mc
+
+                def _ensure_model(name: str, capability_hint: Optional[str] = None):
+                    if not name:
+                        return
+                    if name not in self.models:
+                        mc = ModelConfig(
+                            name=name,
+                            provider=ModelProvider.OLLAMA,
+                            model_id=name,
+                            capabilities=[capability_hint] if capability_hint else [],
+                            requirements={}
                         )
+                        self.models[name] = _apply_overrides(mc)
+
+                def _extend_route(atype: AnalysisType, lst):
+                    if not lst:
+                        return
+                    seq = [m for m in lst if m]
+                    for m in seq:
+                        _ensure_model(m)
+                    existing = self.routing_table.get(atype, [])
+                    # preserve order, de-dup
+                    ordered = []
+                    for m in existing + seq:
+                        if m and m not in ordered:
+                            ordered.append(m)
+                    self.routing_table[atype] = ordered
+
+                models_cfg = config.get('models', {})
+                # Analysis section
+                analysis_cfg = models_cfg.get('analysis', {})
+                if analysis_cfg:
+                    prim = analysis_cfg.get('primary')
+                    fb = analysis_cfg.get('fallback')
+                    spec = analysis_cfg.get('specialized', {})
+                    # Map specialized keys to AnalysisType
+                    spec_map = {
+                        'technical': AnalysisType.TECHNICAL,
+                        'fundamental': AnalysisType.FUNDAMENTAL,
+                        'sentiment': AnalysisType.SENTIMENT,
+                        'news': AnalysisType.NEWS,
+                        'risk': AnalysisType.RISK,
+                        'options': AnalysisType.OPTIONS,
+                        'forecast': AnalysisType.FORECAST,
+                    }
+                    for key, atype in spec_map.items():
+                        model_name = spec.get(key)
+                        if model_name or prim or fb:
+                            _extend_route(atype, [model_name, prim, fb])
+
+                # Trading section: risk/execution/strategy hints
+                trading_cfg = models_cfg.get('trading', {})
+                if trading_cfg:
+                    prim = trading_cfg.get('primary')
+                    fb = trading_cfg.get('fallback')
+                    spec = trading_cfg.get('specialized', {})
+                    _extend_route(AnalysisType.RISK, [spec.get('risk'), prim, fb])
+                    # Map strategy -> TECHNICAL as a general analysis fallback for strategy selection prompts
+                    _extend_route(AnalysisType.TECHNICAL, [spec.get('strategy'), prim, fb])
+
+                # Research section: market/news/reports hints
+                research_cfg = models_cfg.get('research', {})
+                if research_cfg:
+                    prim = research_cfg.get('primary')
+                    fb = research_cfg.get('fallback')
+                    spec = research_cfg.get('specialized', {})
+                    _extend_route(AnalysisType.NEWS, [spec.get('news'), prim, fb])
+                    _extend_route(AnalysisType.FUNDAMENTAL, [spec.get('market'), prim, fb])
+
+                # Optional: routing_rules.task_routing (map task names to AnalysisType when possible)
+                rr = config.get('routing_rules', {})
+                tr = rr.get('task_routing', {})
+                # map common aliases to AnalysisType values
+                alias_map = {
+                    'market_analysis': AnalysisType.TECHNICAL,
+                    'risk_assessment': AnalysisType.RISK,
+                    'trade_execution': AnalysisType.TECHNICAL,
+                    'strategy_optimization': AnalysisType.TECHNICAL,
+                    'sentiment_analysis': AnalysisType.SENTIMENT,
+                    'report_generation': AnalysisType.FORECAST,
+                    'options_pricing': AnalysisType.OPTIONS,
+                    'technical_analysis': AnalysisType.TECHNICAL,
+                    'fundamental_analysis': AnalysisType.FUNDAMENTAL,
+                    'news_analysis': AnalysisType.NEWS,
+                    'time_series_forecast': AnalysisType.FORECAST,
+                }
+                for task_name, model_list in tr.items():
+                    atype = alias_map.get(task_name)
+                    if atype:
+                        _extend_route(atype, model_list)
+
+                logger.info(f"Loaded {len(self.models)} model configurations (production schema)")
+
+            else:
+                # Legacy schema support: llms + selection_strategy
+                # Load LLM configurations
+                for category in ['primary', 'specialized', 'cloud_backup']:
+                    if category in config.get('llms', {}):
+                        for model_name, model_config in config['llms'][category].items():
+                            self.models[model_name] = ModelConfig(
+                                name=model_name,
+                                provider=ModelProvider(model_config.get('provider', 'local')),
+                                model_id=model_config.get('model', model_name),
+                                capabilities=model_config.get('capabilities', []),
+                                requirements=model_config.get('requirements', {}),
+                                quantization=model_config.get('quantization'),
+                                api_key=os.getenv(model_config.get('api_key', '').strip('${}'))
+                            )
+                # Load routing configuration
+                if 'selection_strategy' in config:
+                    routing = config['selection_strategy'].get('routing', {})
+                    for task, models in routing.items():
+                        try:
+                            self.routing_table[AnalysisType(task)] = models
+                        except ValueError:
+                            logger.warning(f"Unknown analysis type in routing: {task}")
+                logger.info(f"Loaded {len(self.models)} model configurations (legacy schema)")
             
-            # Load routing configuration
-            if 'selection_strategy' in config:
-                routing = config['selection_strategy'].get('routing', {})
-                for task, models in routing.items():
-                    try:
-                        self.routing_table[AnalysisType(task)] = models
-                    except ValueError:
-                        logger.warning(f"Unknown analysis type in routing: {task}")
-            
-            logger.info(f"Loaded {len(self.models)} model configurations")
-            
+            # If no models were loaded at all, use fallback
+            if not self.models:
+                logger.warning("No models loaded from config; falling back to built-in defaults")
+                self._use_fallback_config()
+
         except Exception as e:
-            logger.error(f"Failed to load configuration: {e}")
+            logger.warning(f"Configuration file not found, using fallback: {e}")
             self._use_fallback_config()
     
     def _use_fallback_config(self):
         """Use fallback configuration if main config fails."""
-        # Default to available local models
+        logger.info("Using production fallback configuration")
+        
+        # Production models configuration
         if OLLAMA_AVAILABLE:
-            self.models['llama3'] = ModelConfig(
-                name="llama3",
-                provider=ModelProvider.OLLAMA,
-                model_id="llama3.3:70b",
-                capabilities=["general", "analysis"],
-                requirements={"ram": "48GB"}
-            )
-            self.models['qwen'] = ModelConfig(
-                name="qwen",
+            # Main analysis models
+            self.models['qwen2.5-72b'] = ModelConfig(
+                name="qwen2.5-72b",
                 provider=ModelProvider.OLLAMA,
                 model_id="qwen2.5:72b",
-                capabilities=["technical", "financial"],
+                capabilities=["general", "analysis", "technical"],
                 requirements={"ram": "48GB"}
             )
+            self.models['mixtral-8x22b'] = ModelConfig(
+                name="mixtral-8x22b",
+                provider=ModelProvider.OLLAMA,
+                model_id="mixtral:8x22b",
+                capabilities=["trading", "analysis", "strategy"],
+                requirements={"ram": "80GB"}
+            )
+            self.models['deepseek-v3'] = ModelConfig(
+                name="deepseek-v3",
+                provider=ModelProvider.OLLAMA,
+                model_id="deepseek-v3:latest",
+                capabilities=["technical", "strategy", "deep_analysis"],
+                requirements={"ram": "256GB"}
+            )
+            self.models['yi-34b'] = ModelConfig(
+                name="yi-34b",
+                provider=ModelProvider.OLLAMA,
+                model_id="yi:34b",
+                capabilities=["fundamental", "research"],
+                requirements={"ram": "24GB"}
+            )
+            self.models['command-r-plus'] = ModelConfig(
+                name="command-r-plus",
+                provider=ModelProvider.OLLAMA,
+                model_id="command-r-plus:104b",
+                capabilities=["sentiment", "research", "reports"],
+                requirements={"ram": "64GB"}
+            )
+            self.models['solar-10.7b'] = ModelConfig(
+                name="solar-10.7b",
+                provider=ModelProvider.OLLAMA,
+                model_id="solar:10.7b",
+                capabilities=["risk", "news", "fast_analysis"],
+                requirements={"ram": "8GB"}
+            )
+            self.models['phi3-14b'] = ModelConfig(
+                name="phi3-14b",
+                provider=ModelProvider.OLLAMA,
+                model_id="phi3:14b",
+                capabilities=["execution", "risk", "quick_decisions"],
+                requirements={"ram": "10GB"}
+            )
         
-        # Set basic routing
+        # Set routing based on task type
+        self.routing_table[AnalysisType.TECHNICAL] = ["deepseek-v3", "qwen2.5-72b", "mixtral-8x22b"]
+        self.routing_table[AnalysisType.FUNDAMENTAL] = ["yi-34b", "qwen2.5-72b", "command-r-plus"]
+        self.routing_table[AnalysisType.SENTIMENT] = ["command-r-plus", "solar-10.7b", "yi-34b"]
+        self.routing_table[AnalysisType.RISK] = ["solar-10.7b", "phi3-14b", "deepseek-v3"]
+        # Note: STRATEGY is not an explicit AnalysisType; route strategy-like prompts via TECHNICAL
+        # to preserve behavior without expanding the enum here.
+        # self.routing_table[AnalysisType.STRATEGY] = ["deepseek-v3", "mixtral-8x22b", "qwen2.5-72b"]
+        
+        # Default routing for any unspecified types
         for analysis_type in AnalysisType:
-            self.routing_table[analysis_type] = list(self.models.keys())
+            if analysis_type not in self.routing_table:
+                self.routing_table[analysis_type] = ["qwen2.5-72b", "mixtral-8x22b"]
     
     def _initialize_clients(self):
         """Initialize API clients for different providers."""

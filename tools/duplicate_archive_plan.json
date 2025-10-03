@@ -1,0 +1,17 @@
+[
+  {"source": "/srv/coverage_snapshot_full.json", "dest": "/srv/archive/20250925_164605/coverage_snapshot_full.json"}
+,
+  {"source": "/srv/coverage_snapshot.json", "dest": "/srv/archive/20250925_164605/coverage_snapshot.json"}
+,
+  {"source": "/srv/coverage_verify_new.json", "dest": "/srv/archive/20250925_164605/coverage_verify_new.json"}
+,
+  {"source": "/srv/news_seed_report.json", "dest": "/srv/archive/20250925_164605/news_seed_report.json"}
+,
+  {"source": "/srv/options_seed_report.json", "dest": "/srv/archive/20250925_164605/options_seed_report.json"}
+,
+  {"source": "/srv/news_seed_checkpoint.json", "dest": "/srv/archive/20250925_164605/news_seed_checkpoint.json"}
+,
+  {"source": "/srv/social_seed_checkpoint.json", "dest": "/srv/archive/20250925_164605/social_seed_checkpoint.json"}
+,
+  {"source": "/srv/backfill_progress.json", "dest": "/srv/archive/20250925_164605/backfill_progress.json"}
+]

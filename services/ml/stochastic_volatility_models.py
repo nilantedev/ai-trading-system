@@ -25,6 +25,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
 import matplotlib.pyplot as plt
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "../../shared/python-common"))
+
 from trading_common import MarketData, get_settings, get_logger
 from trading_common.cache import get_trading_cache
 

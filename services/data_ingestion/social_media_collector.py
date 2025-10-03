@@ -10,8 +10,8 @@ import json
 import logging
 import re
 from typing import Dict, List, Optional, Any, AsyncGenerator
-from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, asdict, field
 from collections import defaultdict, deque
 import hashlib
 import os
@@ -19,6 +19,11 @@ from urllib.parse import urlencode
 
 from trading_common import get_settings, get_logger
 from trading_common.cache import get_trading_cache
+from trading_common.messaging import get_pulsar_client
+try:
+    from shared.vector.weaviate_schema import get_weaviate_client  # type: ignore
+except Exception:  # noqa: BLE001
+    get_weaviate_client = None  # type: ignore
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -36,7 +41,8 @@ class SocialSignal:
     author: str
     timestamp: datetime
     url: Optional[str] = None
-    tags: List[str] = None
+    # Use a default factory for lists to avoid mutable default pitfalls and None checks
+    tags: List[str] = field(default_factory=list)
     
 
 @dataclass
@@ -243,11 +249,24 @@ class RedditCollector:
         for subreddit in subreddits:
             try:
                 url = f'https://oauth.reddit.com/r/{subreddit}/search.json'
+                # Map hours_back to Reddit time filter buckets
+                if hours_back <= 1:
+                    t_filter = 'hour'
+                elif hours_back <= 24:
+                    t_filter = 'day'
+                elif hours_back <= 7 * 24:
+                    t_filter = 'week'
+                elif hours_back <= 30 * 24:
+                    t_filter = 'month'
+                elif hours_back <= 365 * 24:
+                    t_filter = 'year'
+                else:
+                    t_filter = 'all'
                 params = {
                     'q': f'${symbol}',
                     'sort': 'new',
                     'limit': 25,
-                    't': 'day'
+                    't': t_filter
                 }
                 
                 async with self.session.get(url, params=params) as response:
@@ -255,7 +274,7 @@ class RedditCollector:
                         continue
                         
                     data = await response.json()
-                    subreddit_signals = self._process_reddit_data(data, symbol, subreddit)
+                    subreddit_signals = self._process_reddit_data(data, symbol, subreddit, hours_back)
                     signals.extend(subreddit_signals)
                     
             except Exception as e:
@@ -264,7 +283,7 @@ class RedditCollector:
                 
         return signals
     
-    def _process_reddit_data(self, data: Dict, symbol: str, subreddit: str) -> List[SocialSignal]:
+    def _process_reddit_data(self, data: Dict, symbol: str, subreddit: str, hours_back: int) -> List[SocialSignal]:
         """Process Reddit API response."""
         signals = []
         
@@ -277,7 +296,8 @@ class RedditCollector:
                 # Skip if too old
                 created_utc = post.get('created_utc', 0)
                 post_time = datetime.fromtimestamp(created_utc)
-                if (datetime.utcnow() - post_time).total_seconds() > 3600:  # 1 hour
+                # Honor requested hours_back instead of a fixed 1 hour window
+                if (datetime.utcnow() - post_time).total_seconds() > max(1, hours_back) * 3600:
                     continue
                 
                 title = post.get('title', '')
@@ -610,7 +630,23 @@ class SocialMediaCollector:
         self.twitter = TwitterCollector()
         self.reddit = RedditCollector()
         self.news = NewsCollector()
-        
+        self.enable_structured_logs = os.getenv('ENABLE_STRUCTURED_INGEST_LOGS','false').lower() in ('1','true','yes')
+        # Messaging & persistence
+        self.pulsar_client = None
+        self.producer = None
+        self._pulsar_topic = 'persistent://trading/production/social-data'
+        self.enable_qdb_persist = os.getenv('ENABLE_QUESTDB_SOCIAL_PERSIST', 'false').lower() in ('1','true','yes')
+        try:
+            from questdb.ingress import Sender as _QSender, TimestampNanos as _QTs  # type: ignore
+            self._qdb_sender_cls = _QSender
+            self._qdb_ts = _QTs
+        except Exception:  # noqa: BLE001
+            self._qdb_sender_cls = None
+            self._qdb_ts = None
+        self._qdb_conf: Optional[str] = None
+        # Optional vector store persistence
+        self.enable_weaviate_persist = os.getenv('ENABLE_WEAVIATE_SOCIAL_PERSIST', 'false').lower() in ('1','true','yes')
+
         self.cache = None
         self.is_initialized = False
         
@@ -622,13 +658,43 @@ class SocialMediaCollector:
         """Initialize all collectors."""
         logger.info("Initializing Social Media Collector")
         
-        self.cache = get_trading_cache()
+        # Acquire cache client (async) – previously missing await caused a coroutine to leak
+        try:
+            self.cache = await get_trading_cache()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Cache init failed for social collector: {e}")
+            self.cache = None
         
         # Initialize collectors
         twitter_ok = await self.twitter.initialize()
         reddit_ok = await self.reddit.initialize()
         news_ok = await self.news.initialize()
         
+        # Init Pulsar producer (best-effort)
+        try:
+            self.pulsar_client = get_pulsar_client()
+            self.producer = self.pulsar_client.create_producer(
+                topic=self._pulsar_topic,
+                producer_name='social-media-collector'
+            )
+            logger.info("Social producer connected")
+        except Exception as e:
+            logger.warning(f"Social producer init failed: {e}")
+
+        # Configure QuestDB sender conf string (reusing env vars)
+        try:
+            if self.enable_qdb_persist and self._qdb_sender_cls:
+                host = os.getenv('QUESTDB_HOST', 'trading-questdb')
+                proto = os.getenv('QUESTDB_INGEST_PROTOCOL', 'tcp').strip().lower()
+                if proto == 'http':
+                    port = int(os.getenv('QUESTDB_HTTP_PORT', '9000'))
+                    self._qdb_conf = f"http::addr={host}:{port};"
+                else:
+                    port = int(os.getenv('QUESTDB_LINE_TCP_PORT', '9009'))
+                    self._qdb_conf = f"tcp::addr={host}:{port};"
+        except Exception:
+            self._qdb_conf = None
+
         self.is_initialized = True
         
         logger.info(f"Social Media Collector initialized - "
@@ -646,6 +712,11 @@ class SocialMediaCollector:
         for symbol in symbols:
             try:
                 symbol_signals = []
+                if self.enable_structured_logs:
+                    try:
+                        logger.info("social_collect_symbol_start", extra={"event":"social_collect_symbol_start","symbol":symbol,"hours_back":hours_back})
+                    except Exception:
+                        pass
                 
                 # Collect from all sources concurrently
                 tasks = [
@@ -667,13 +738,32 @@ class SocialMediaCollector:
                 results[symbol] = symbol_signals
                 self.signals_collected += len(symbol_signals)
                 
-                # Cache results
+                # Cache results (ensure datetime is JSON-serializable)
                 if self.cache and symbol_signals:
                     cache_key = f"social_signals:{symbol}:latest"
-                    cache_data = [asdict(signal) for signal in symbol_signals]
+                    cache_data = []
+                    for signal in symbol_signals:
+                        payload = asdict(signal)
+                        ts = payload.get("timestamp")
+                        if isinstance(ts, datetime):
+                            payload["timestamp"] = ts.isoformat()
+                        cache_data.append(payload)
                     await self.cache.set_json(cache_key, cache_data, ttl=300)
+                # Persist and publish if enabled
+                try:
+                    await self._persist_and_publish(symbol_signals)
+                except Exception as e:
+                    logger.debug(f"Persist/publish social signals failed for {symbol}: {e}")
                 
                 logger.debug(f"Collected {len(symbol_signals)} social signals for {symbol}")
+                if self.enable_structured_logs:
+                    try:
+                        logger.info(
+                            "social_collect_symbol_complete",
+                            extra={"event":"social_collect_symbol_complete","symbol":symbol,"count":len(symbol_signals)}
+                        )
+                    except Exception:
+                        pass
                 
             except Exception as e:
                 logger.error(f"Failed to collect social data for {symbol}: {e}")
@@ -758,6 +848,138 @@ class SocialMediaCollector:
         await self.twitter.close()
         await self.reddit.close()
         await self.news.close()
+        try:
+            if self.pulsar_client:
+                if self.producer:
+                    self.producer.close()
+                self.pulsar_client.close()
+        except Exception:
+            pass
+
+    async def _persist_and_publish(self, signals: List[SocialSignal]) -> None:
+        """Persist signals to QuestDB and publish to Pulsar if configured.
+
+        Table: social_signals (created implicitly)
+          symbols: symbol, source
+          columns: sentiment (float), engagement (float), influence (float), author (str), url (str), content (str)
+          ts: signal.timestamp
+        """
+        if not signals:
+            return
+        # Publish
+        if self.producer:
+            try:
+                for s in signals:
+                    payload = asdict(s)
+                    # Convert datetime to iso
+                    if isinstance(payload.get('timestamp'), datetime):
+                        payload['timestamp'] = payload['timestamp'].isoformat()
+                    self.producer.send(json.dumps(payload, default=str).encode('utf-8'))
+            except Exception as e:
+                logger.debug(f"Social publish failed: {e}")
+        # Persist to QuestDB (ILP preferred)
+        ilp_ok = False
+        if self.enable_qdb_persist and self._qdb_sender_cls and self._qdb_ts and self._qdb_conf:
+            try:
+                with self._qdb_sender_cls.from_conf(self._qdb_conf) as s:  # type: ignore[arg-type]
+                    for sig in signals:
+                        try:
+                            at_ts = self._qdb_ts.from_datetime(sig.timestamp)
+                            s.row(
+                                'social_signals',
+                                symbols={'symbol': sig.symbol.upper(), 'source': sig.source},
+                                columns={
+                                    'sentiment': float(sig.sentiment_score or 0.0),
+                                    'engagement': float(sig.engagement_score or 0.0),
+                                    'influence': float(sig.influence_score or 0.0),
+                                    'author': str(sig.author or '')[:120],
+                                    'url': str(sig.url or '')[:300],
+                                    'content': str(sig.content or '')[:500],
+                                },
+                                at=at_ts,
+                            )
+                        except Exception:
+                            continue
+                    s.flush()
+                ilp_ok = True
+            except Exception as e:
+                logger.debug(f"Social QuestDB ILP persist failed: {e}")
+
+        # HTTP /exec fallback with CREATE TABLE IF NOT EXISTS
+        if not ilp_ok:
+            try:
+                host = os.getenv('QUESTDB_HOST', 'trading-questdb')
+                http_port = int(os.getenv('QUESTDB_HTTP_PORT', '9000'))
+                qdb_url = os.getenv('QUESTDB_HTTP_URL', f"http://{host}:{http_port}/exec")
+                import aiohttp as _aio
+                async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=20)) as sess:
+                    # Create table if missing
+                    create_sql = (
+                        "create table if not exists social_signals ("
+                        "symbol symbol, source symbol, sentiment double, engagement double, influence double, "
+                        "author string, url string, content string, ts timestamp) timestamp(ts) PARTITION BY DAY"
+                    )
+                    async with sess.get(qdb_url, params={"query": create_sql}) as r:
+                        await r.text()
+                    # Insert rows in small batches
+                    vals = []
+                    for sig in signals:
+                        try:
+                            ts_iso = (sig.timestamp.isoformat() if isinstance(sig.timestamp, datetime) else str(sig.timestamp)).replace('Z','')
+                            ts_iso = ts_iso.split('.')[0] + ".000000Z"
+                            vals.append(
+                                "('" + sig.symbol.upper().replace("'","") + "','" + sig.source.replace("'","") + "',"
+                                + f"{float(sig.sentiment_score or 0.0):.6f},{float(sig.engagement_score or 0.0):.6f},{float(sig.influence_score or 0.0):.6f},"
+                                + "'" + (sig.author or '').replace("'","")[:120] + "','" + (sig.url or '').replace("'","")[:300] + "','"
+                                + (sig.content or '').replace("'","")[:500] + "',"
+                                + f"to_timestamp('{ts_iso}', 'yyyy-MM-ddTHH:mm:ss.SSSSSSZ'))"
+                            )
+                        except Exception:
+                            continue
+                    # Chunk inserts to avoid overly large query strings
+                    for i in range(0, len(vals), 500):
+                        chunk = vals[i:i+500]
+                        if not chunk:
+                            continue
+                        ins = "insert into social_signals(symbol,source,sentiment,engagement,influence,author,url,content,ts) values " + ",".join(chunk)
+                        async with sess.get(qdb_url, params={"query": ins}) as r2:
+                            await r2.text()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Social QuestDB HTTP persist failed: {e}")
+        # Best-effort Weaviate indexing (optional)
+        if self.enable_weaviate_persist and signals and get_weaviate_client is not None:
+            try:
+                client = await asyncio.to_thread(get_weaviate_client)
+                coll = client.collections.get('SocialSentiment')
+                batch_size = int(os.getenv('WEAVIATE_INDEX_BATCH_SIZE', '64'))
+                # Map signals to properties matching desired schema
+                payload = []
+                for s in signals:
+                    try:
+                        props = {
+                            'symbol': s.symbol,
+                            'platform': s.source,
+                            'sentiment': f"{float(s.sentiment_score or 0.0):.4f}",
+                            'momentum': f"{float(s.engagement_score or 0.0):.4f}",
+                            'topics': [],
+                            # Weaviate expects RFC3339 (with timezone). Normalize to UTC with Z suffix.
+                            'timestamp': (
+                                s.timestamp.replace(tzinfo=timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+                                if isinstance(s.timestamp, datetime) else str(s.timestamp)
+                            ),
+                            'influential_mentions': f"{float(s.influence_score or 0.0):.4f}",
+                            'confidence': '',
+                        }
+                        payload.append(props)
+                    except Exception:
+                        continue
+                for i in range(0, len(payload), batch_size):
+                    chunk = payload[i:i+batch_size]
+                    with coll.batch.dynamic() as batch:
+                        for props in chunk:
+                            batch.add_object(properties=props)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Social Weaviate indexing skipped/failed: {e}")
 
 
 # Global social media collector instance

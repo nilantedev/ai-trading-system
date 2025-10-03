@@ -22,6 +22,15 @@ import pandas as pd
 
 from trading_common.config import get_settings
 
+# QuestDB ILP support
+try:
+    from questdb.ingress import Sender, IngressError
+    _QUESTDB_AVAILABLE = True
+except ImportError:
+    _QUESTDB_AVAILABLE = False
+    Sender = None
+    IngressError = None
+
 logger = logging.getLogger(__name__)
 
 # Metrics
@@ -131,6 +140,9 @@ class RealTimeMarketStream:
         # Load configuration
         self._load_configuration()
         
+        # QuestDB persistence setup
+        self._setup_questdb_persistence()
+        
         logger.info("Real-time Market Stream handler initialized")
     
     def _load_configuration(self):
@@ -141,7 +153,11 @@ class RealTimeMarketStream:
             'alpaca_key': os.getenv('ALPACA_API_KEY', ''),
             'alpaca_secret': os.getenv('ALPACA_SECRET_KEY', ''),
             'buffer_size': int(os.getenv('MARKET_DATA_BUFFER_SIZE', '1000')),
-            'batch_size': int(os.getenv('MARKET_DATA_BATCH_SIZE', '100'))
+            'batch_size': int(os.getenv('MARKET_DATA_BATCH_SIZE', '100')),
+            'finnhub_enabled': os.getenv('FINNHUB_WEBSOCKET_ENABLED', 'false').lower() in ('1','true','yes'),
+            'persist_to_questdb': os.getenv('REALTIME_PERSIST_QUESTDB', 'true').lower() in ('1','true','yes'),
+            'questdb_host': os.getenv('QUESTDB_HOST', 'trading-questdb'),
+            'questdb_ilp_port': int(os.getenv('QUESTDB_ILP_PORT', '9009'))
         }
         
         # WebSocket endpoints
@@ -150,6 +166,82 @@ class RealTimeMarketStream:
             'alpaca': 'wss://stream.data.alpaca.markets/v2/sip',
             'finnhub': 'wss://ws.finnhub.io'
         }
+    
+    def _setup_questdb_persistence(self):
+        """Setup QuestDB ILP connection for real-time persistence."""
+        self.questdb_enabled = False
+        self.questdb_conf = None
+        
+        if not self.config.get('persist_to_questdb', True):
+            logger.info("QuestDB persistence disabled by config")
+            return
+        
+        if not _QUESTDB_AVAILABLE:
+            logger.warning("questdb-client not installed, persistence disabled")
+            return
+        
+        try:
+            host = self.config['questdb_host']
+            port = self.config['questdb_ilp_port']
+            self.questdb_conf = f'tcp::{host}:{port}'
+            self.questdb_enabled = True
+            logger.info(f"QuestDB persistence enabled: {self.questdb_conf}")
+        except Exception as e:
+            logger.error(f"Failed to setup QuestDB persistence: {e}")
+    
+    async def _persist_quote_to_questdb(self, symbol: str, data: Dict, provider: str):
+        """Persist real-time quote to QuestDB market_data table."""
+        if not (self.questdb_enabled and self.questdb_conf and Sender):
+            return
+        
+        try:
+            # Extract OHLCV-like data from quote
+            # For real-time quotes, we use bid/ask to construct bar-like data
+            bid_price = data.get('bp') or data.get('bid_price') or data.get('p')
+            ask_price = data.get('ap') or data.get('ask_price') or data.get('p')
+            
+            if not bid_price or not ask_price:
+                return  # Need at least bid/ask or price
+            
+            # Use mid-price as close, bid as low, ask as high
+            mid_price = (float(bid_price) + float(ask_price)) / 2
+            low_price = float(bid_price)
+            high_price = float(ask_price)
+            
+            # Volume from quote if available
+            volume = int(data.get('v') or data.get('volume') or data.get('s') or 0)
+            
+            # Timestamp - use quote timestamp or current
+            ts = data.get('t') or data.get('timestamp')
+            if ts:
+                if isinstance(ts, (int, float)):
+                    # Unix timestamp in milliseconds or seconds
+                    if ts > 1e12:  # milliseconds
+                        dt = datetime.utcfromtimestamp(ts / 1000.0)
+                    else:  # seconds
+                        dt = datetime.utcfromtimestamp(ts)
+                else:
+                    dt = datetime.utcnow()
+            else:
+                dt = datetime.utcnow()
+            
+            # Convert to nanoseconds
+            ts_nanos = int((dt - datetime(1970, 1, 1)).total_seconds() * 1_000_000_000)
+            
+            # Write to QuestDB using ILP
+            with Sender(self.questdb_conf) as sender:
+                sender.row('market_data') \
+                      .symbol('symbol', symbol) \
+                      .str('source', f'{provider}_realtime') \
+                      .float_column('open', mid_price) \
+                      .float_column('high', high_price) \
+                      .float_column('low', low_price) \
+                      .float_column('close', mid_price) \
+                      .long_column('volume', volume) \
+                      .at(ts_nanos)
+                
+        except Exception as e:
+            logger.error(f"Failed to persist quote to QuestDB: {e}")
     
     async def connect_polygon(self, symbols: List[str]):
         """Connect to Polygon.io WebSocket stream."""
@@ -317,6 +409,76 @@ class RealTimeMarketStream:
             except Exception as e:
                 logger.error(f"Error processing Alpaca message: {e}")
                 ws_errors_counter.labels(provider='alpaca', error_type='processing').inc()
+
+    async def connect_finnhub(self, symbols: List[str]):
+        """Connect to Finnhub WebSocket stream.
+
+        Endpoint: wss://ws.finnhub.io?token=API_KEY
+        Subscribe format: {"type":"subscribe","symbol":"AAPL"}
+        Message types typically include {"type":"trade","data":[{...}]}
+        """
+        api_key = os.getenv('FINNHUB_API_KEY', '').strip()
+        if not api_key:
+            logger.warning("Finnhub WebSocket disabled or no API key")
+            return
+        try:
+            url = f"{self.endpoints['finnhub']}?token={api_key}"
+            async with websockets.connect(url, ping_interval=20) as websocket:
+                self.connections['finnhub'] = websocket
+                ws_connections_gauge.labels(provider='finnhub').inc()
+                # Subscribe to symbols
+                for sym in symbols:
+                    try:
+                        sub = {"type": "subscribe", "symbol": sym}
+                        await websocket.send(json.dumps(sub))
+                    except Exception:
+                        continue
+                # Create buffer
+                self.buffers['finnhub'] = MarketDataBuffer(self.config['buffer_size'])
+                # Listen loop
+                await self._finnhub_listen(websocket)
+        except Exception as e:
+            logger.error(f"Finnhub WebSocket error: {e}")
+            ws_errors_counter.labels(provider='finnhub', error_type=type(e).__name__).inc()
+            await self._schedule_reconnect('finnhub', symbols)
+
+    async def _finnhub_listen(self, websocket: WebSocketClientProtocol):
+        """Listen to Finnhub WebSocket messages and route to handlers."""
+        logger.info("Started listening to Finnhub stream")
+        while self.running:
+            try:
+                msg = await asyncio.wait_for(websocket.recv(), timeout=60)
+                data = json.loads(msg)
+                if not isinstance(data, dict):
+                    continue
+                mtype = data.get('type')
+                if mtype == 'trade':
+                    for t in data.get('data', []) or []:
+                        try:
+                            sym = t.get('s') or t.get('symbol')
+                            if not sym:
+                                continue
+                            # Treat as trade event
+                            self.buffers['finnhub'].add_trade(sym, t)
+                            data_points_counter.labels(symbol=sym, type='trade').inc()
+                            await self._call_handlers('trade', sym, t)
+                            ws_messages_counter.labels(provider='finnhub', type='trade').inc()
+                        except Exception:
+                            continue
+                else:
+                    # heartbeat or other types
+                    ws_messages_counter.labels(provider='finnhub', type=mtype or 'unknown').inc()
+            except asyncio.TimeoutError:
+                try:
+                    await websocket.ping()
+                except Exception:
+                    break
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("Finnhub WebSocket connection closed")
+                break
+            except Exception as e:
+                logger.error(f"Error processing Finnhub message: {e}")
+                ws_errors_counter.labels(provider='finnhub', error_type='processing').inc()
     
     async def _process_trade(self, provider: str, data: Dict):
         """Process trade data from stream."""
@@ -354,6 +516,9 @@ class RealTimeMarketStream:
             
             # Update metrics
             data_points_counter.labels(symbol=symbol, type='quote').inc()
+            
+            # Persist to QuestDB
+            await self._persist_quote_to_questdb(symbol, data, provider)
             
             # Check for significant spread changes (potential opportunity)
             if 'bp' in data and 'ap' in data:  # Bid/Ask prices
@@ -483,19 +648,36 @@ class RealTimeMarketStream:
     
     async def start(self, symbols: List[str]):
         """Start real-time streaming for specified symbols."""
-        logger.info(f"Starting real-time streams for {len(symbols)} symbols")
+        logger.info(f"Starting real-time streams for {len(symbols)} symbols", extra={
+            'polygon_enabled': self.config['polygon_enabled'],
+            'polygon_key_present': bool(self.config['polygon_key']),
+            'alpaca_key_present': bool(self.config['alpaca_key']),
+            'alpaca_secret_present': bool(self.config['alpaca_secret'])
+        })
         self.running = True
         
         # Start connections based on configuration
         tasks = []
         
         if self.config['polygon_enabled'] and self.config['polygon_key']:
+            logger.info("Adding Polygon WebSocket connection task")
             tasks.append(asyncio.create_task(self.connect_polygon(symbols)))
+        else:
+            logger.warning(f"Polygon disabled: enabled={self.config['polygon_enabled']}, key={bool(self.config['polygon_key'])}")
         
         if self.config['alpaca_key'] and self.config['alpaca_secret']:
+            logger.info("Adding Alpaca WebSocket connection task")
             tasks.append(asyncio.create_task(self.connect_alpaca(symbols)))
+        else:
+            logger.warning(f"Alpaca disabled: key={bool(self.config['alpaca_key'])}, secret={bool(self.config['alpaca_secret'])}")
         
+        # Optional Finnhub (free-tier) gated
+        if self.config.get('finnhub_enabled'):
+            logger.info("Adding Finnhub WebSocket connection task")
+            tasks.append(asyncio.create_task(self.connect_finnhub(symbols)))
+
         if tasks:
+            logger.info(f"Starting {len(tasks)} WebSocket connection(s)")
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             logger.warning("No streaming providers configured")

@@ -1,0 +1,45 @@
+name: Options Coverage Report
+
+on:
+  schedule:
+    - cron: '30 2 * * *'  # daily at 02:30 UTC
+  workflow_dispatch: {}
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (aiohttp only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp==3.11.10
+
+      - name: Generate coverage JSON
+        env:
+          QUESTDB_HTTP_URL: ${{ secrets.QUESTDB_HTTP_URL }}
+          UNDERLYINGS: ${{ vars.OPTIONS_COVERAGE_UNDERLYINGS }}
+        run: |
+          python services/data_ingestion/scripts/options_coverage_report.py \
+            --questdb-url "${QUESTDB_HTTP_URL}" \
+            --underlyings "${UNDERLYINGS}"
+          python - <<'PY'
+import json, sys, os, pathlib
+out = pathlib.Path('options_coverage.json')
+out.write_text(sys.stdin.read() if sys.stdin.isatty()==False else '')
+PY
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: options_coverage
+          path: options_coverage.json

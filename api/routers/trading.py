@@ -163,36 +163,44 @@ async def place_order(
         from services.execution.order_management_system import get_order_management_system
         
         oms = await get_order_management_system()
-        
-        # Place real order through OMS
-        order = await oms.place_order(order_request, user)
-        
-        mock_order = Order(
-            order_id=order_id,
-            client_order_id=order_request.client_order_id,
-            symbol=order_request.symbol,
-            side=order_request.side,
-            order_type=order_request.order_type,
-            quantity=order_request.quantity,
-            price=order_request.price,
-            stop_price=order_request.stop_price,
-            time_in_force=order_request.time_in_force,
-            status=OrderStatus.PENDING,
-            filled_quantity=0.0,
-            remaining_quantity=order_request.quantity,
-            average_fill_price=None,
-            created_at=datetime.utcnow(),
-            updated_at=None,
-            fills=[],
-            commission=0.0
+        # Submit via OMS and return actual order snapshot
+        oms_order = await oms.place_order(order_request, user)
+        logger.info(
+            "Order placed: %s %s %s %s",
+            oms_order.order_id,
+            oms_order.side.value,
+            oms_order.quantity,
+            oms_order.symbol,
         )
-        
-        logger.info(f"Order placed: {order_id} - {order_request.side.value} {order_request.quantity} {order_request.symbol}")
-        
-        return OrderResponse(
-            order=mock_order,
-            message=f"Order {order_id} placed successfully"
+        # Adapt OMS dataclass to API Pydantic model to satisfy response schema
+        api_order = Order(
+            order_id=oms_order.order_id,
+            client_order_id=oms_order.client_order_id,
+            symbol=oms_order.symbol,
+            side=OrderSide(oms_order.side.value),
+            order_type=OrderType(oms_order.order_type.value),
+            quantity=oms_order.quantity,
+            price=oms_order.price,
+            stop_price=oms_order.stop_price,
+            time_in_force=TimeInForce(oms_order.time_in_force.value),
+            status=OrderStatus(oms_order.status.value),
+            filled_quantity=oms_order.filled_quantity,
+            remaining_quantity=oms_order.remaining_quantity,
+            average_fill_price=oms_order.average_fill_price,
+            created_at=oms_order.created_at,
+            updated_at=oms_order.updated_at,
+            fills=[
+                Fill(
+                    fill_id=f.get('fill_id'),
+                    quantity=f.get('quantity'),
+                    price=f.get('price'),
+                    timestamp=f.get('timestamp'),
+                    commission=f.get('commission', 0.0)
+                ) for f in (oms_order.fills or [])
+            ],
+            commission=oms_order.commission
         )
+        return OrderResponse(order=api_order, message=f"Order {api_order.order_id} placed")
         
     except Exception as e:
         logger.error(f"Error placing order: {e}")

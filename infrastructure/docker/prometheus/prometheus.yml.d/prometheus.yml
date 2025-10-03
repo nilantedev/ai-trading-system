@@ -1,0 +1,36 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+  - job_name: 'api'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['api:8000']
+  - job_name: 'ml'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['ml:8001']
+  - job_name: 'data-ingestion'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['data-ingestion:8002']
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['loki:3100']
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+  - job_name: 'weaviate'
+    metrics_path: /v1/.well-known/metrics
+    static_configs:
+      - targets: ['weaviate:8080']
