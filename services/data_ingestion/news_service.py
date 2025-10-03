@@ -856,7 +856,7 @@ class NewsService:
                         source=src,
                         published_at=published,
                         url=url,
-                        sentiment_score=None,
+                        sentiment_score=0.0,  # Default neutral sentiment, will be analyzed later
                         relevance_score=0.7,
                         symbols=[sym]
                     )
@@ -1466,7 +1466,7 @@ class NewsService:
                                         source=art.get('source',{}).get('name','NewsAPI'),
                                         published_at=published,
                                         url=art.get('url',''),
-                                        sentiment_score=None,
+                                        sentiment_score=0.0,  # Default neutral, analyzed later
                                         relevance_score=self._calculate_relevance(art, symbols),
                                         symbols=self._extract_symbols(art.get('title','') + ' ' + art.get('description',''), symbols)
                                     )
@@ -1655,7 +1655,7 @@ class NewsService:
                     source=str(source or 'GDELT'),
                     published_at=published,
                     url=url,
-                    sentiment_score=None,
+                    sentiment_score=0.0,  # Default neutral, analyzed later
                     relevance_score=0.6 if syms_out else 0.4,
                     symbols=syms_out or (syms[:1] if syms else ['ALL'])
                 )
@@ -1927,7 +1927,7 @@ class NewsService:
                             source='Finnhub',
                             published_at=datetime.fromtimestamp(article.get('datetime', 0)),
                             url=article.get('url', ''),
-                            sentiment_score=None,
+                            sentiment_score=0.0,  # Default neutral, analyzed later
                             relevance_score=0.9,
                             symbols=[symbol]
                         )
