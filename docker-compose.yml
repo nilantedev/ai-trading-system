@@ -197,7 +197,7 @@ services:
 
   # Weaviate - Vector database
   weaviate:
-    image: semitechnologies/weaviate:1.25.10
+    image: semitechnologies/weaviate:1.33.0
     container_name: trading-weaviate
     environment:
       - QUERY_DEFAULTS_LIMIT=25
