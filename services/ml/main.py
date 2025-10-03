@@ -3488,14 +3488,14 @@ async def ollama_warm_switch(payload: WarmModePayload):
         targets = DAY_HOT_MODELS if mode == 'day' else NIGHT_HEAVY_MODELS
         await model_router.check_model_availability()
         res = await _warmup_ollama_models(model_router, targets)
-        # Night mode may include DeepSeek warming as a separate step
+        # Night mode may include Llama night model warming as a separate step
         extra = None
-        if mode == 'night' and _is_deepseek_night_allowed() and DEEPSEEK_MODEL:
+        if mode == 'night' and _is_llama_night_allowed() and LLAMA_NIGHT_MODEL:
             try:
-                extra = await _warmup_ollama_models(model_router, [DEEPSEEK_MODEL])
+                extra = await _warmup_ollama_models(model_router, [LLAMA_NIGHT_MODEL])
             except Exception:
                 extra = None
-        return {'status': 'ok', 'mode': mode, 'targets': targets + (([DEEPSEEK_MODEL] if mode=='night' and _is_deepseek_night_allowed() and DEEPSEEK_MODEL else [])), 'results': res, 'extra': extra}
+        return {'status': 'ok', 'mode': mode, 'targets': targets + (([LLAMA_NIGHT_MODEL] if mode=='night' and _is_llama_night_allowed() and LLAMA_NIGHT_MODEL else [])), 'results': res, 'extra': extra}
     except HTTPException:
         raise
     except Exception as e:
