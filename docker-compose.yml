@@ -363,7 +363,7 @@ services:
     image: ollama/ollama:latest
     container_name: trading-ollama
     environment:
-      - OLLAMA_KEEP_ALIVE=1h
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
     ports:
       - "11434:11434"
     volumes:
