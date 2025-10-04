@@ -615,6 +615,7 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
       API_BASE_URL: http://api:8000
+      TRADING_MODE: ${TRADING_MODE:-PAPER}
     ports:
       - "127.0.0.1:8004:8004"
     depends_on:
@@ -643,6 +644,7 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
       API_BASE_URL: http://api:8000
+      TRADING_MODE: ${TRADING_MODE:-PAPER}
     ports:
       - "127.0.0.1:8005:8005"
     depends_on:
@@ -673,6 +675,7 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0
       API_BASE_URL: http://api:8000
+      TRADING_MODE: ${TRADING_MODE:-PAPER}
     ports:
       - "127.0.0.1:8006:8006"
     depends_on:
