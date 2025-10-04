@@ -119,10 +119,8 @@ class OptionsSymbolDiscovery:
                     data = await resp.json()
                 
                 results = data.get('results', [])
-                if not results:
-                    break
                 
-                # Extract underlying symbols from contracts
+                # Extract underlying symbols from contracts (even if empty, we need to check pagination)
                 for contract in results:
                     underlying = contract.get('underlying_ticker')
                     if underlying:
@@ -132,7 +130,7 @@ class OptionsSymbolDiscovery:
                 
                 total_contracts += len(results)
                 
-                # Check pagination
+                # Check pagination - ALWAYS check for next_url/cursor, even if results are empty
                 next_url = data.get('next_url')
                 status = data.get('status')
                 
@@ -146,17 +144,37 @@ class OptionsSymbolDiscovery:
                     except Exception as e:
                         logger.warning(f"Failed to parse next_url: {e}")
                         cursor = None
+                else:
+                    # No next_url means no more pages
+                    cursor = None
                 
-                if not cursor or status == 'DELAYED':  # DELAYED means we hit the limit
-                    break
+                # Stop only if we have no more pages (no cursor) AND no results
+                if not cursor and not results:
+                    if status == 'OK':
+                        # Normal end - no more pages
+                        logger.info(f"Reached end of data at page {page}")
+                        break
+                    elif status == 'DELAYED':
+                        # Rate limited but may have more data - wait and retry
+                        logger.warning(f"Status DELAYED at page {page}, waiting 60s before continuing...")
+                        await asyncio.sleep(60)
+                        continue
+                    else:
+                        # Unknown status with no cursor
+                        logger.warning(f"No cursor and status={status} at page {page}, assuming end")
+                        break
                 
                 # Rate limiting - be gentle with API
                 await asyncio.sleep(0.5)
                 
-                # Safety limit
-                if page >= 100:  # ~100k contracts
-                    logger.warning(f"Reached page limit at {page} pages")
-                    break
+                # Log progress every 50 pages
+                if page % 50 == 0:
+                    logger.info(f"Progress: page {page}, contracts {total_contracts}, unique symbols {len(optionable_symbols)}")
+                
+                # Safety check: warn if we're fetching an unusually large number of pages
+                if page >= 1000 and page % 100 == 0:
+                    logger.warning(f"Still fetching at page {page} - found {len(optionable_symbols)} symbols so far...")
+                    logger.info("This is normal for complete market coverage but will take time")
         
         except Exception as e:
             logger.error(f"Error discovering options symbols: {e}")

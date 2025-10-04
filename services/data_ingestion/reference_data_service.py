@@ -199,11 +199,11 @@ class ReferenceDataService:
         return exchange_info
     
     async def get_watchlist_symbols(self) -> List[str]:
-        """Get list of symbols to monitor."""
-        # Try to get custom watchlist from Redis
+        """Get list of symbols to monitor - optionable symbols only."""
+        # Try to get custom watchlist from Redis (optionable symbols only)
         if self.redis_client:
             try:
-                custom_symbols = await self.redis_client.smembers("watchlist:symbols")
+                custom_symbols = await self.redis_client.smembers("watchlist")
                 if custom_symbols:
                     # Return sorted for determinism in orchestrations
                     return sorted(list(custom_symbols))
@@ -277,7 +277,7 @@ class ReferenceDataService:
                     tickers.append(sym)
                 if tickers:
                     try:
-                        await self.redis_client.sadd("watchlist:symbols", *tickers)
+                        await self.redis_client.sadd("watchlist", *tickers)
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"Failed to add batch to watchlist: {e}")
                     added += len(tickers)
@@ -306,10 +306,10 @@ class ReferenceDataService:
         return added
     
     async def add_to_watchlist(self, symbols: List[str]) -> bool:
-        """Add symbols to watchlist."""
+        """Add symbols to watchlist (optionable symbols only)."""
         if self.redis_client:
             try:
-                await self.redis_client.sadd("watchlist:symbols", *symbols)
+                await self.redis_client.sadd("watchlist", *symbols)
                 logger.info(f"Added {len(symbols)} symbols to watchlist")
                 return True
             except Exception as e:
@@ -321,7 +321,7 @@ class ReferenceDataService:
         """Remove symbols from watchlist."""
         if self.redis_client:
             try:
-                await self.redis_client.srem("watchlist:symbols", *symbols)
+                await self.redis_client.srem("watchlist", *symbols)
                 logger.info(f"Removed {len(symbols)} symbols from watchlist")
                 return True
             except Exception as e:
