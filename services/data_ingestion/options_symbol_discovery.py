@@ -96,6 +96,11 @@ class OptionsSymbolDiscovery:
         cursor = None
         total_contracts = 0
         
+        # Track symbol count to detect when we stop finding new ones
+        symbols_at_checkpoint = 0
+        checkpoint_page = 0
+        stagnant_pages = 0
+        
         try:
             while True:
                 page += 1
@@ -167,14 +172,38 @@ class OptionsSymbolDiscovery:
                 # Rate limiting - be gentle with API
                 await asyncio.sleep(0.5)
                 
-                # Log progress every 50 pages
-                if page % 50 == 0:
+                # Check progress at checkpoints (every 100 pages)
+                if page % 100 == 0:
+                    current_count = len(optionable_symbols)
+                    new_symbols = current_count - symbols_at_checkpoint
+                    
+                    logger.info(f"Progress: page {page}, contracts {total_contracts}, unique symbols {current_count}")
+                    logger.info(f"New symbols in last 100 pages: {new_symbols}")
+                    
+                    # OPTIMIZATION: Stop if no new symbols found in last 200 pages
+                    if new_symbols == 0:
+                        stagnant_pages += 100
+                        if stagnant_pages >= 200:
+                            logger.info(f"No new symbols found in last {stagnant_pages} pages")
+                            logger.info(f"Discovered {current_count} optionable symbols - stopping early")
+                            logger.info("Market coverage complete for active options")
+                            break
+                    else:
+                        stagnant_pages = 0  # Reset counter when we find new symbols
+                    
+                    # Update checkpoint
+                    symbols_at_checkpoint = current_count
+                    checkpoint_page = page
+                
+                # Log progress every 50 pages (less verbose)
+                elif page % 50 == 0:
                     logger.info(f"Progress: page {page}, contracts {total_contracts}, unique symbols {len(optionable_symbols)}")
                 
-                # Safety check: warn if we're fetching an unusually large number of pages
-                if page >= 1000 and page % 100 == 0:
-                    logger.warning(f"Still fetching at page {page} - found {len(optionable_symbols)} symbols so far...")
-                    logger.info("This is normal for complete market coverage but will take time")
+                # Safety limit: stop at 3000 pages (comprehensive market coverage)
+                if page >= 3000:
+                    logger.warning(f"Reached safety limit at {page} pages - found {len(optionable_symbols)} symbols")
+                    logger.info("This represents comprehensive market coverage")
+                    break
         
         except Exception as e:
             logger.error(f"Error discovering options symbols: {e}")
@@ -184,31 +213,41 @@ class OptionsSymbolDiscovery:
         
         return optionable_symbols
     
-    async def discover_options_symbols_tickers_endpoint(self) -> Set[str]:
+    async def discover_options_symbols_fast(self) -> Set[str]:
         """
-        Alternative method: Use tickers endpoint filtered for options-enabled symbols
-        This is a backup method if contracts endpoint fails
+        FAST method: Query recent options activity to find actively traded symbols
+        This is much faster than scanning all contracts (6000+ symbols in ~100 pages vs 10,000+ pages)
         """
         if not self.polygon_api_key:
             raise ValueError("POLYGON_API_KEY not configured")
         
-        logger.info("Discovering options symbols via tickers endpoint...")
+        logger.info("Fast discovery: Finding symbols with recent options activity...")
         
         optionable_symbols: Set[str] = set()
         
-        # Polygon doesn't have a direct "has_options" filter, but we can try market=options
-        # or use the reference endpoint with type filtering
-        url = f"{self.polygon_base_url}/v3/reference/tickers"
+        # Query recent options contracts (last 90 days expiration)
+        from datetime import datetime, timedelta
+        today = datetime.utcnow()
+        min_expiry = today.strftime('%Y-%m-%d')
+        max_expiry = (today + timedelta(days=90)).strftime('%Y-%m-%d')
+        
+        url = f"{self.polygon_base_url}/v3/reference/options/contracts"
         
         params = {
             'apiKey': self.polygon_api_key,
-            'market': 'stocks',
-            'active': 'true',
             'limit': 1000,
+            'expired': 'false',
+            'expiration_date.gte': min_expiry,
+            'expiration_date.lte': max_expiry,
+            'order': 'asc',
+            'sort': 'ticker'
         }
         
         page = 0
         cursor = None
+        total_contracts = 0
+        stagnant_pages = 0
+        symbols_at_checkpoint = 0
         
         try:
             while True:
@@ -216,6 +255,8 @@ class OptionsSymbolDiscovery:
                 query_params = dict(params)
                 if cursor:
                     query_params['cursor'] = cursor
+                
+                logger.info(f"Fetching recent options contracts page {page}...")
                 
                 async with self.session.get(url, params=query_params) as resp:
                     if resp.status == 429:
@@ -230,34 +271,59 @@ class OptionsSymbolDiscovery:
                     data = await resp.json()
                 
                 results = data.get('results', [])
-                if not results:
-                    break
                 
-                for ticker in results:
-                    symbol = ticker.get('ticker')
-                    # Check if ticker has options (this would need to be verified per symbol)
-                    # For now, we'll need to use the contracts method as authoritative
-                    if symbol:
-                        symbol = str(symbol).strip().upper()
-                        if symbol:
-                            optionable_symbols.add(symbol)
+                # Extract underlying symbols
+                for contract in results:
+                    underlying = contract.get('underlying_ticker')
+                    if underlying:
+                        underlying = str(underlying).strip().upper()
+                        if underlying and underlying.replace('.', '').replace('-', '').isalnum():
+                            optionable_symbols.add(underlying)
                 
-                cursor = data.get('next_url')
-                if cursor and isinstance(cursor, str) and cursor.startswith('http'):
+                total_contracts += len(results)
+                
+                # Check for more pages
+                next_url = data.get('next_url')
+                if next_url:
                     from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(cursor)
+                    parsed = urlparse(next_url)
                     cursor_list = parse_qs(parsed.query).get('cursor', [])
                     cursor = cursor_list[0] if cursor_list else None
+                else:
+                    cursor = None
                 
-                if not cursor or page >= 10:  # Limit pages for backup method
+                # Stop if no more pages or no results
+                if not cursor and not results:
                     break
                 
-                await asyncio.sleep(0.5)
+                # Progress tracking - stop early if stagnant
+                if page % 50 == 0:
+                    current_count = len(optionable_symbols)
+                    logger.info(f"Progress: page {page}, contracts {total_contracts}, unique symbols {current_count}")
+                    
+                    if page % 100 == 0:
+                        new_symbols = current_count - symbols_at_checkpoint
+                        if new_symbols == 0:
+                            stagnant_pages += 100
+                            if stagnant_pages >= 100:  # Stop after 100 pages with no new symbols
+                                logger.info(f"No new symbols in last {stagnant_pages} pages - stopping")
+                                break
+                        else:
+                            stagnant_pages = 0
+                        symbols_at_checkpoint = current_count
+                
+                # Safety limit for fast method
+                if page >= 500:
+                    logger.info(f"Reached page limit for fast discovery at {page}")
+                    break
+                
+                await asyncio.sleep(0.3)  # Faster rate for smaller dataset
         
         except Exception as e:
-            logger.error(f"Error in tickers discovery: {e}")
+            logger.error(f"Error in fast discovery: {e}")
+            raise
         
-        logger.info(f"Found {len(optionable_symbols)} symbols via tickers endpoint")
+        logger.info(f"Fast discovery complete: {len(optionable_symbols)} symbols from {total_contracts} recent contracts")
         return optionable_symbols
     
     async def get_optionable_symbols(self, use_cache: bool = True, cache_ttl: int = 86400) -> List[str]:
@@ -290,16 +356,24 @@ class OptionsSymbolDiscovery:
             except Exception as e:
                 logger.warning(f"Cache read failed: {e}")
         
-        # Discover from API
+        # Discover from API - use fast method by default
         try:
-            symbols = await self.discover_options_symbols_polygon()
+            logger.info("Using fast discovery method (recent contracts only)")
+            symbols = await self.discover_options_symbols_fast()
+            
+            # If fast method returns too few symbols, fall back to full scan
+            if len(symbols) < 1000:
+                logger.warning(f"Fast discovery found only {len(symbols)} symbols - using full scan")
+                symbols = await self.discover_options_symbols_polygon()
         except Exception as e:
-            logger.error(f"Primary discovery failed: {e}")
-            # Try backup method
+            logger.error(f"Fast discovery failed: {e}")
+            # Try full scan method
             try:
-                symbols = await self.discover_options_symbols_tickers_endpoint()
+                logger.info("Falling back to full discovery scan")
+                symbols = await self.discover_options_symbols_polygon()
             except Exception as e2:
-                logger.error(f"Backup discovery also failed: {e2}")
+                logger.error(f"Full discovery also failed: {e2}")
+                # Last resort - return empty set
                 raise RuntimeError("All discovery methods failed") from e
         
         if not symbols:
@@ -368,6 +442,8 @@ async def main():
     
     parser = argparse.ArgumentParser(description='Discover optionable symbols and sync watchlist')
     parser.add_argument('--no-cache', action='store_true', help='Force fresh discovery')
+    parser.add_argument('--fast', action='store_true', help='Use fast discovery (recent contracts only, ~5min)')
+    parser.add_argument('--full', action='store_true', help='Use full discovery (all contracts, may take hours)')
     parser.add_argument('--export', type=str, help='Export to file path')
     parser.add_argument('--sync-watchlist', action='store_true', help='Sync Redis watchlist')
     parser.add_argument('--dry-run', action='store_true', help='Discover only, no sync')
@@ -380,7 +456,15 @@ async def main():
         await discovery.initialize()
         
         # Discover optionable symbols
-        symbols = await discovery.get_optionable_symbols(use_cache=not args.no_cache)
+        if args.fast:
+            logger.info("Using FAST discovery method (--fast flag)")
+            symbols = sorted(list(await discovery.discover_options_symbols_fast()))
+        elif args.full:
+            logger.info("Using FULL discovery method (--full flag)")
+            symbols = sorted(list(await discovery.discover_options_symbols_polygon()))
+        else:
+            # Default: use cache or fast method
+            symbols = await discovery.get_optionable_symbols(use_cache=not args.no_cache)
         
         print(f"\n{'='*70}")
         print(f"OPTIONS SYMBOL DISCOVERY COMPLETE")

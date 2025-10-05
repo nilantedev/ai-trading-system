@@ -631,9 +631,11 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     delta_lookback_days = 1
                 try:
-                    delta_max_symbols = int(os.getenv("DAILY_DELTA_MAX_SYMBOLS", "200"))
+                    delta_max_symbols = int(os.getenv("DAILY_DELTA_MAX_SYMBOLS", "0"))
+                    if delta_max_symbols <= 0:
+                        delta_max_symbols = None  # No limit - process all
                 except Exception:
-                    delta_max_symbols = 200
+                    delta_max_symbols = None  # No limit
                 try:
                     delta_pacing_seconds = float(os.getenv("DAILY_DELTA_PACING_SECONDS", "0.15"))
                 except Exception:
@@ -649,8 +651,9 @@ async def lifespan(app: FastAPI):
                                     end_dt = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                                     # Use configurable lookback
                                     start_dt = end_dt - timedelta(days=max(1, delta_lookback_days))
-                                    # Iterate up to max symbols with light pacing to respect vendor limits
-                                    for sym in symbols[:max(1, delta_max_symbols)]:
+                                    # Process all symbols if no limit, otherwise apply limit
+                                    process_symbols = symbols if delta_max_symbols is None else symbols[:max(1, delta_max_symbols)]
+                                    for sym in process_symbols:
                                         try:
                                             rows = await market_data_svc.get_bulk_daily_historical(sym, start_dt, end_dt)
                                             logger.info("Daily delta fetched", symbol=sym, bars=len(rows))
@@ -833,6 +836,8 @@ async def lifespan(app: FastAPI):
                         social_years = SOCIAL_BACKFILL_YEARS
                     try:
                         social_batch = int(os.getenv("SOCIAL_BACKFILL_SYMBOLS", "200"))
+                        if social_batch <= 0:
+                            social_batch = None  # No limit - process all watchlist symbols
                     except Exception:
                         social_batch = 200
                     async def _social_backfill_once():
@@ -847,7 +852,9 @@ async def lifespan(app: FastAPI):
                         if not syms:
                             fb = os.getenv('SOCIAL_FALLBACK_SYMBOLS', 'AAPL,MSFT,TSLA,NVDA,SPY')
                             syms = [s.strip().upper() for s in fb.split(',') if s.strip()]
-                        syms = syms[:max(1, social_batch)]
+                        # Process all symbols if social_batch is None, otherwise limit
+                        if social_batch is not None:
+                            syms = syms[:max(1, social_batch)]
                         hours = int(social_years * 365.25 * 24)
                         # Chunk symbols to keep API load reasonable
                         chunk = int(os.getenv('SOCIAL_BACKFILL_CHUNK', '25') or '25')
@@ -926,6 +933,8 @@ async def lifespan(app: FastAPI):
                     opt_interval = 14400
                 try:
                     opt_max_underlyings = int(os.getenv("DAILY_OPTIONS_MAX_UNDERLYINGS", "50"))
+                    if opt_max_underlyings <= 0:
+                        opt_max_underlyings = None  # No limit - process all watchlist symbols
                 except Exception:
                     opt_max_underlyings = 50
                 try:
@@ -948,7 +957,11 @@ async def lifespan(app: FastAPI):
                             LOOP_STATUS['daily_options']["interval_seconds"] = max(300, opt_interval)
                             if reference_svc and market_data_svc and getattr(market_data_svc, 'enable_options_ingest', False):
                                 underlyings = await reference_svc.get_watchlist_symbols()
-                                underlyings = (underlyings or [])[:max(1, opt_max_underlyings)]
+                                # Process all symbols if opt_max_underlyings is None, otherwise limit
+                                if opt_max_underlyings is not None:
+                                    underlyings = (underlyings or [])[:max(1, opt_max_underlyings)]
+                                else:
+                                    underlyings = underlyings or []
                                 # Derive expiry window near-term to control load
                                 now_d = datetime.utcnow().date()
                                 start_expiry = now_d - timedelta(days=max(0, opt_expiry_back_days))
@@ -1428,9 +1441,11 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     years = 20
                 try:
-                    max_symbols = int(os.getenv("EQUITY_BACKFILL_MAX_SYMBOLS", "500"))
+                    max_symbols = int(os.getenv("EQUITY_BACKFILL_MAX_SYMBOLS", "0"))
+                    if max_symbols <= 0:
+                        max_symbols = None  # No limit - process all watchlist symbols
                 except Exception:
-                    max_symbols = 500
+                    max_symbols = None  # No limit on error
                 try:
                     pacing = float(os.getenv("EQUITY_BACKFILL_PACING_SECONDS", "0.2"))
                 except Exception:
@@ -1452,7 +1467,9 @@ async def lifespan(app: FastAPI):
                             syms = (await reference_svc.get_watchlist_symbols()) or []
                         if not syms:
                             syms = ['AAPL','MSFT','TSLA','NVDA','SPY']
-                        syms = syms[:max(1, max_symbols)]
+                        # Process all symbols if max_symbols is None, otherwise limit
+                        if max_symbols is not None:
+                            syms = syms[:max(1, max_symbols)]
 
                         end_dt = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                         start_dt = end_dt - timedelta(days=int(years * 365.25))
@@ -1674,9 +1691,12 @@ async def lifespan(app: FastAPI):
                 logger.info("Weaviate reconciliation loop started (feature flag ENABLE_WEAVIATE_RECONCILE)")
 
             # Auto-refresh watchlist from Polygon (daily discovery of new optionable symbols)
-            if os.getenv("ENABLE_WATCHLIST_AUTO_REFRESH", "true").lower() in ("1","true","yes"):
+            # Watchlist auto-refresh disabled - use manual discovery script instead
+            # The full options discovery can take 20+ minutes due to Polygon rate limits
+            # Run: docker exec trading-data-ingestion python services/data_ingestion/options_symbol_discovery.py --sync-watchlist
+            if os.getenv("ENABLE_WATCHLIST_AUTO_REFRESH", "false").lower() in ("1","true","yes"):
                 async def _watchlist_refresh_loop():
-                    """Daily refresh of optionable symbols from Polygon API."""
+                    """Daily refresh using lightweight method - full discovery should be run offline."""
                     refresh_interval = int(os.getenv("WATCHLIST_REFRESH_INTERVAL_SECONDS", str(24*3600)))  # Default: daily
                     LOOP_STATUS.setdefault('watchlist_refresh', {"enabled": True, "last_run": None, "last_error": None, "interval_seconds": refresh_interval})
                     LOOP_STATUS['watchlist_refresh']["enabled"] = True
@@ -1688,18 +1708,20 @@ async def lifespan(app: FastAPI):
                                 await asyncio.sleep(60)
                                 continue
                             
-                            logger.info("Starting automated watchlist refresh from Polygon")
+                            logger.info("Starting lightweight watchlist refresh (top liquid symbols only)")
+                            # Use lightweight method for automated refresh
                             count = await reference_svc.populate_watchlist_from_polygon(
                                 locale='us',
                                 market='stocks',
                                 active=True,
-                                types='CS,ETF,ADRC',  # Common Stock, ETF, ADR
+                                types='CS',  # Common stock only
                                 page_limit=1000,
-                                max_pages=None  # Get all pages
+                                max_pages=2  # Limit to ~2000 symbols for performance
                             )
-                            logger.info(f"Watchlist refreshed: {count} symbols", source='polygon')
+                            logger.info(f"Watchlist refreshed (lightweight): {count} symbols", source='polygon')
                             LOOP_STATUS['watchlist_refresh']["last_run"] = datetime.utcnow().isoformat()
                             LOOP_STATUS['watchlist_refresh']["last_error"] = None
+                            LOOP_STATUS['watchlist_refresh']["last_count"] = count
                             try:
                                 if LOOP_LAST_RUN_UNIX:
                                     LOOP_LAST_RUN_UNIX.labels(loop='watchlist_refresh').set(time.time())
@@ -1712,7 +1734,7 @@ async def lifespan(app: FastAPI):
                         await asyncio.sleep(refresh_interval)
                 
                 asyncio.create_task(_watchlist_refresh_loop())
-                logger.info("Automated watchlist refresh enabled (ENABLE_WATCHLIST_AUTO_REFRESH)")
+                logger.info("Automated lightweight watchlist refresh enabled (ENABLE_WATCHLIST_AUTO_REFRESH - set to false by default)")
 
         # Fire-and-forget optional component initialization so startup isn't blocked
         asyncio.create_task(_init_optional_components())

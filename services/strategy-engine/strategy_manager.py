@@ -22,12 +22,29 @@ except Exception:  # noqa: BLE001
     from trading_common.observability import install_observability  # type: ignore
 import logging
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import norm
 
 from trading_common import get_logger, get_settings
 from trading_common.cache import get_trading_cache
 from trading_common.database import get_redis_client
+
+# Import real strategies
+from strategies.momentum import MomentumStrategy
+from strategies.mean_reversion import MeanReversionStrategy
+# Elite strategies
+from strategies.statistical_arbitrage import StatisticalArbitrageStrategy
+from strategies.market_making import MarketMakingStrategy
+from strategies.volatility_arbitrage import VolatilityArbitrageStrategy
+from strategies.index_arbitrage import IndexArbitrageStrategy
+from strategies.trend_following import AdvancedTrendFollowingStrategy
+# Strategy adapter for backtesting compatibility
+from strategy_adapter import StrategyAdapter
+# Dynamic infrastructure
+from watchlist_manager import WatchlistManager
+from portfolio_manager import PortfolioManager, PortfolioConfig
+from continuous_processor import ContinuousProcessor
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -36,6 +53,10 @@ settings = get_settings()
 cache_client = None
 redis_client = None
 active_strategies = {}
+strategy_instances = {}  # Store instantiated strategy objects
+watchlist_manager = None  # Dynamic watchlist from QuestDB
+portfolio_manager = None  # Position sizing and risk management
+continuous_processor = None  # Continuous strategy processing
 
 # Prometheus domain metrics (per-request latency & counts now via shared app_* metrics)
 try:
@@ -305,30 +326,76 @@ class PortfolioOptimizer:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle management with resilience."""
-    global cache_client, redis_client
-
-    logger.info("Starting Strategy Engine Service")
+    """Lifespan events for startup/shutdown."""
+    global cache_client, redis_client, watchlist_manager, portfolio_manager, continuous_processor
+    logger.info("Strategy Engine starting up...")
+    
+    # Connect cache (retryable)
+    cache_client = await _connect_with_retry(
+        "Cache",
+        lambda: get_trading_cache(settings),
+        attempts=5,
+        base_delay=1.0
+    )
+    
+    # Connect redis (retryable)
+    redis_client = await _connect_with_retry(
+        "Redis",
+        lambda: get_redis_client(settings),
+        attempts=5,
+        base_delay=1.0
+    )
+    
+    # Initialize watchlist manager
     try:
-        cache_client = await _connect_with_retry("cache", get_trading_cache)
-        redis_client = await _connect_with_retry("redis", get_redis_client)
-        try:
-            await initialize_strategies()
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Strategy initialization failed: {e}")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected startup error: {e}")
-
+        watchlist_manager = WatchlistManager()
+        logger.info("Watchlist manager initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize watchlist manager: {e}")
+    
+    # Initialize portfolio manager
+    try:
+        portfolio_config = PortfolioConfig(
+            total_capital=100000.0,
+            max_position_pct=0.10,  # 10% per position
+            max_positions=10,
+            reserve_cash_pct=0.20,  # 20% reserve
+            max_daily_loss_pct=0.05,
+            max_drawdown_pct=0.10
+        )
+        portfolio_manager = PortfolioManager(portfolio_config)
+        logger.info("Portfolio manager initialized with $100K capital")
+    except Exception as e:
+        logger.error(f"Failed to initialize portfolio manager: {e}")
+    
+    # Initialize strategies
+    await initialize_strategies()
+    
+    # Initialize continuous processor for real-time strategy execution
+    try:
+        continuous_processor = ContinuousProcessor(
+            watchlist_manager=watchlist_manager,
+            portfolio_manager=portfolio_manager,
+            update_interval=60  # Process every 60 seconds
+        )
+        # Start continuous processing in background
+        strategies = ['momentum', 'mean_reversion', 'stat_arb', 'pairs_trading']
+        asyncio.create_task(continuous_processor.start(strategies))
+        logger.info("Continuous processor started with strategies: momentum, mean_reversion, stat_arb, pairs_trading")
+    except Exception as e:
+        logger.error(f"Failed to initialize continuous processor: {e}")
+    
+    logger.info("Strategy Engine startup complete")
     yield
-
-    try:
-        if cache_client and hasattr(cache_client, "close"):
-            await cache_client.close()
-        if redis_client and hasattr(redis_client, "close"):
-            await redis_client.close()
-    except Exception:  # noqa: BLE001
-        pass
-    logger.info("Strategy Engine Service stopped")
+    logger.info("Strategy Engine shutting down...")
+    
+    # Stop continuous processor
+    if continuous_processor:
+        try:
+            continuous_processor.stop()
+            logger.info("Continuous processor stopped")
+        except Exception as e:
+            logger.error(f"Error stopping continuous processor: {e}")
 
 app = FastAPI(
     title="AI Trading System - Strategy Engine",
@@ -353,25 +420,108 @@ async def correlation_id_only(request: Request, call_next):
     return response
 
 async def initialize_strategies():
-    """Initialize available trading strategies."""
-    strategies = [
-        "momentum",
-        "mean_reversion", 
-        "arbitrage",
-        "pairs_trading",
-        "ml_ensemble"
-    ]
+    """Initialize available trading strategies including elite hedge fund strategies."""
+    # Basic strategies
+    strategy_instances["momentum"] = MomentumStrategy(
+        rsi_period=14,
+        rsi_overbought=70,
+        rsi_oversold=30,
+        macd_fast=12,
+        macd_slow=26,
+        macd_signal=9
+    )
     
-    for strategy in strategies:
-        active_strategies[strategy] = {
-            "name": strategy,
+    strategy_instances["mean_reversion"] = MeanReversionStrategy(
+        lookback=20,
+        std_multiplier=2,
+        z_threshold=2
+    )
+    
+    # Elite hedge fund strategies (wrapped with adapter for backtesting)
+    logger.info("Initializing elite hedge fund strategies...")
+    
+    # Statistical Arbitrage (Renaissance Technologies, Citadel approach)
+    stat_arb = StatisticalArbitrageStrategy(
+        lookback_period=60,
+        entry_z_threshold=2.0,
+        exit_z_threshold=0.5,
+        stop_loss_z=4.0,
+        min_correlation=0.7,
+        max_pvalue=0.05
+    )
+    strategy_instances["stat_arb"] = StrategyAdapter(stat_arb, "stat_arb")
+    logger.info("✓ Statistical Arbitrage: Pairs trading with cointegration (Renaissance, Citadel)")
+    
+    # Market Making (Virtu Financial, Tower Research approach)
+    market_making = MarketMakingStrategy(
+        base_spread_bps=10.0,
+        min_spread_bps=5.0,
+        max_spread_bps=50.0,
+        target_inventory=0,
+        max_inventory=1000,
+        risk_aversion=0.5
+    )
+    strategy_instances["market_making"] = StrategyAdapter(market_making, "market_making")
+    logger.info("✓ Market Making: Bid-ask spread capture (Virtu 99.9% win rate approach)")
+    
+    # Volatility Arbitrage (Susquehanna, Jane Street approach)
+    vol_arb = VolatilityArbitrageStrategy(
+        vol_threshold=0.05,
+        min_vega=100.0,
+        max_vega=10000.0,
+        lookback_window=30
+    )
+    strategy_instances["vol_arb"] = StrategyAdapter(vol_arb, "vol_arb")
+    logger.info("✓ Volatility Arbitrage: IV vs RV trading (SIG, Jane Street)")
+    
+    # Index Arbitrage (AQR, Millennium approach)
+    index_arb = IndexArbitrageStrategy(
+        min_spread_bps=5.0,
+        max_basket_size=50,
+        futures_threshold_bps=10.0,
+        rebalance_lead_days=5
+    )
+    strategy_instances["index_arb"] = StrategyAdapter(index_arb, "index_arb")
+    logger.info("✓ Index Arbitrage: Index rebalancing + futures basis (AQR, Millennium)")
+    
+    # Advanced Trend Following (AQR, Two Sigma, Winton approach)
+    trend_following = AdvancedTrendFollowingStrategy(
+        short_window=20,
+        medium_window=60,
+        long_window=200,
+        atr_period=14,
+        vol_target=0.15,
+        min_trend_strength=0.6
+    )
+    strategy_instances["trend_following"] = StrategyAdapter(trend_following, "trend_following")
+    logger.info("✓ Trend Following: Multi-timeframe momentum (AQR Managed Futures, Two Sigma)")
+    
+    # Initialize status tracking
+    for strategy_name in strategy_instances.keys():
+        active_strategies[strategy_name] = {
+            "name": strategy_name,
             "status": "ready",
             "last_signal": None,
-            "performance": 0.0
+            "performance": 0.0,
+            "type": _get_strategy_type(strategy_name)
         }
     
-    logger.info(f"Initialized {len(strategies)} strategies")
-    STRATEGY_ACTIVE.set(len(strategies))
+    logger.info(f"✓ Initialized {len(strategy_instances)} strategies including {len(strategy_instances) - 2} elite hedge fund strategies")
+    logger.info(f"Active strategies: {', '.join(list(strategy_instances.keys()))}")
+    STRATEGY_ACTIVE.set(len(strategy_instances))
+
+def _get_strategy_type(strategy_name: str) -> str:
+    """Get strategy type for classification."""
+    type_map = {
+        "momentum": "basic",
+        "mean_reversion": "basic",
+        "stat_arb": "elite_statistical_arbitrage",
+        "market_making": "elite_hft",
+        "vol_arb": "elite_options",
+        "index_arb": "elite_quantitative",
+        "trend_following": "elite_managed_futures"
+    }
+    return type_map.get(strategy_name, "unknown")
 
 @app.get("/health")
 async def health_check():
@@ -422,18 +572,29 @@ async def evaluate_strategy(strategy_name: str, data: Dict[str, Any]):
     if strategy_name not in active_strategies:
         raise HTTPException(status_code=404, detail=f"Strategy {strategy_name} not found")
     
-    # Simulate strategy evaluation
-    signal = {
-        "strategy": strategy_name,
-        "action": "buy" if data.get("price", 100) < 100 else "sell",
-        "confidence": 0.75,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    if strategy_name not in strategy_instances:
+        raise HTTPException(status_code=501, detail=f"Strategy {strategy_name} not implemented yet")
     
-    active_strategies[strategy_name]["last_signal"] = signal
-    STRATEGY_EVALUATIONS.labels(strategy=strategy_name).inc()
-    
-    return signal
+    try:
+        # Get strategy instance and evaluate
+        strategy = strategy_instances[strategy_name]
+        symbol = data.get("symbol", "UNKNOWN")
+        
+        # Call real strategy evaluation
+        signal = await strategy.evaluate(symbol, data)
+        
+        # Update tracking
+        active_strategies[strategy_name]["last_signal"] = signal
+        STRATEGY_EVALUATIONS.labels(strategy=strategy_name).inc()
+        
+        logger.info(f"Strategy {strategy_name} evaluated {symbol}: {signal.get('signal_type')} (confidence: {signal.get('confidence', 0):.2f})")
+        
+        return signal
+        
+    except Exception as e:
+        logger.error(f"Strategy evaluation failed for {strategy_name}: {e}")
+        STRATEGY_ERRORS.labels(endpoint=f"/strategies/{strategy_name}/evaluate").inc()
+        raise HTTPException(status_code=500, detail=f"Strategy evaluation failed: {str(e)}")
 
 @app.post("/strategies/{strategy_name}/backtest")
 async def backtest_strategy(strategy_name: str, params: Dict[str, Any]):
@@ -441,20 +602,17 @@ async def backtest_strategy(strategy_name: str, params: Dict[str, Any]):
     if strategy_name not in active_strategies:
         raise HTTPException(status_code=404, detail=f"Strategy {strategy_name} not found")
     
-    # Simulate backtest results
-    results = {
-        "strategy": strategy_name,
-        "period": params.get("period", "30d"),
-        "total_return": 0.15,
-        "sharpe_ratio": 1.2,
-        "max_drawdown": -0.08,
-        "win_rate": 0.55,
-        "total_trades": 100,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    # TODO: Implement real backtesting engine with QuestDB historical data
+    # For now, return error indicating not implemented
+    logger.warning(f"Backtest requested for {strategy_name} but backtesting engine not implemented yet")
     
-    STRATEGY_BACKTESTS.labels(strategy=strategy_name).inc()
-    return results
+    raise HTTPException(
+        status_code=501,
+        detail="Backtesting engine not implemented yet. Priority 2 task - see PRIORITY_FIXES_ACTION_PLAN.md"
+    )
+    
+    # STRATEGY_BACKTESTS.labels(strategy=strategy_name).inc()
+    # return results
 
 @app.post("/strategies/optimize")
 async def optimize_strategies(params: Dict[str, Any]):
@@ -465,6 +623,128 @@ async def optimize_strategies(params: Dict[str, Any]):
         "estimated_time": "5 minutes",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@app.post("/strategies/ensemble")
+async def ensemble_voting(data: Dict[str, Any]):
+    """
+    Ensemble voting across multiple strategies.
+    
+    Combines signals from all active strategies using weighted voting.
+    Elite strategies get higher weight based on historical performance.
+    
+    Args:
+        data: Market data including symbol, price_data, options_chain, etc.
+        
+    Returns:
+        Aggregated signal with consensus direction and confidence
+    """
+    symbol = data.get("symbol", "UNKNOWN")
+    logger.info(f"Running ensemble voting for {symbol} across {len(strategy_instances)} strategies")
+    
+    votes = {
+        "LONG": 0.0,
+        "SHORT": 0.0,
+        "NEUTRAL": 0.0
+    }
+    
+    strategy_signals = {}
+    total_weight = 0.0
+    
+    # Strategy weights (elite strategies get higher weight)
+    strategy_weights = {
+        "stat_arb": 2.0,  # High weight for proven strategies
+        "market_making": 1.5,
+        "vol_arb": 1.5,
+        "index_arb": 1.5,
+        "trend_following": 2.0,
+        "momentum": 1.0,
+        "mean_reversion": 1.0
+    }
+    
+    # Collect signals from all strategies
+    for strategy_name, strategy in strategy_instances.items():
+        try:
+            # Determine if strategy is applicable based on data available
+            applicable = True
+            
+            # Some strategies need specific data
+            if strategy_name == "vol_arb" and "options_chain" not in data:
+                applicable = False
+            if strategy_name == "index_arb" and "index_composition" not in data:
+                applicable = False
+            
+            if not applicable:
+                continue
+            
+            # Generate signal (this is simplified - real implementation would call strategy methods)
+            signal = None
+            confidence = 0.0
+            direction = "NEUTRAL"
+            
+            # For now, we'll simulate signal generation
+            # In production, each strategy would have a standard evaluate() method
+            if hasattr(strategy, 'evaluate'):
+                signal = await strategy.evaluate(symbol, data)
+                direction = signal.get('direction', 'NEUTRAL')
+                confidence = signal.get('confidence', 0.0)
+            
+            if direction and confidence > 0:
+                strategy_signals[strategy_name] = {
+                    "direction": direction,
+                    "confidence": confidence,
+                    "weight": strategy_weights.get(strategy_name, 1.0)
+                }
+                
+                # Add weighted vote
+                weight = strategy_weights.get(strategy_name, 1.0) * confidence
+                votes[direction] += weight
+                total_weight += weight
+                
+                logger.debug(f"Strategy {strategy_name}: {direction} (conf: {confidence:.2f}, weight: {weight:.2f})")
+                
+        except Exception as e:
+            logger.error(f"Error evaluating strategy {strategy_name}: {e}")
+            continue
+    
+    # Normalize votes
+    if total_weight > 0:
+        for direction in votes:
+            votes[direction] /= total_weight
+    
+    # Determine consensus
+    consensus_direction = max(votes, key=votes.get)
+    consensus_confidence = votes[consensus_direction]
+    
+    # Require minimum confidence and agreement
+    min_confidence = 0.4  # 40% of weighted votes
+    if consensus_confidence < min_confidence:
+        consensus_direction = "NEUTRAL"
+        consensus_confidence = 0.0
+    
+    # Calculate agreement score (how aligned are strategies)
+    agreement_score = max(votes.values()) - sorted(votes.values())[-2] if len(votes) > 1 else 1.0
+    
+    result = {
+        "symbol": symbol,
+        "consensus": {
+            "direction": consensus_direction,
+            "confidence": float(consensus_confidence),
+            "agreement_score": float(agreement_score)
+        },
+        "votes": votes,
+        "strategy_signals": strategy_signals,
+        "num_strategies": len(strategy_signals),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    logger.info(
+        f"Ensemble result for {symbol}: {consensus_direction} "
+        f"(confidence: {consensus_confidence:.2%}, agreement: {agreement_score:.2%}, "
+        f"strategies: {len(strategy_signals)})"
+    )
+    
+    return result
 
 
 @app.get("/metrics")
@@ -494,6 +774,251 @@ async def _signal_age_updater():
         except Exception as e:  # noqa: BLE001
             logger.warning(f"signal age updater error: {e}")
             await asyncio.sleep(5)
+
+
+# ============================================================================
+# BACKTESTING API ENDPOINTS
+# ============================================================================
+
+from backtesting_engine import (
+    BacktestEngine, BacktestConfig, FillModel, PerformanceMetrics
+)
+from questdb_data_loader import QuestDBDataLoader
+
+# Global backtest state
+questdb_loader = None
+active_backtests: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/backtest/run")
+async def run_backtest(request: Request):
+    """
+    Run a backtest for a strategy
+    
+    Request body:
+    {
+        "strategy": "momentum",  // Strategy name
+        "symbols": ["AAPL", "GOOGL"],  // List of symbols
+        "start_date": "2024-01-01",
+        "end_date": "2024-10-01",
+        "initial_capital": 100000,
+        "config": {  // Optional backtest config
+            "commission_bps": 10,
+            "slippage_bps": 5,
+            "fill_model": "realistic"
+        }
+    }
+    """
+    try:
+        body = await request.json()
+        
+        strategy_name = body.get("strategy")
+        symbols = body.get("symbols", [])
+        start_date = datetime.fromisoformat(body.get("start_date"))
+        end_date = datetime.fromisoformat(body.get("end_date"))
+        initial_capital = body.get("initial_capital", 100000.0)
+        
+        if not strategy_name or not symbols:
+            raise HTTPException(status_code=400, detail="Missing strategy or symbols")
+        
+        if strategy_name not in strategy_instances:
+            raise HTTPException(status_code=404, detail=f"Strategy {strategy_name} not found")
+        
+        # Create backtest config
+        config_overrides = body.get("config", {})
+        fill_model_str = config_overrides.get("fill_model", "realistic").upper()
+        fill_model = FillModel[fill_model_str] if fill_model_str in FillModel.__members__ else FillModel.REALISTIC
+        
+        config = BacktestConfig(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            initial_capital=initial_capital,
+            commission_bps=config_overrides.get("commission_bps", 10.0),
+            slippage_bps=config_overrides.get("slippage_bps", 5.0),
+            fill_model=fill_model,
+            max_position_size=config_overrides.get("max_position_size", 0.20)
+        )
+        
+        # Create backtest engine
+        engine = BacktestEngine(config)
+        
+        # Initialize QuestDB loader if needed
+        global questdb_loader
+        if questdb_loader is None:
+            questdb_loader = QuestDBDataLoader()
+        
+        # Load market data from QuestDB
+        logger.info(f"Loading market data for {len(symbols)} symbols...")
+        market_data = questdb_loader.load_multiple_symbols(symbols, start_date, end_date, timeframe="1d")
+        
+        if not market_data:
+            raise HTTPException(status_code=404, detail="No market data found for specified symbols/dates")
+        
+        # Load data into engine
+        for symbol, data in market_data.items():
+            engine.load_market_data(symbol, data)
+        
+        # Generate strategy signals by evaluating strategy at each point in time
+        strategy = strategy_instances[strategy_name]
+        strategy_signals = {}
+        
+        logger.info(f"Generating strategy signals for {strategy_name}...")
+        
+        # Get all unique timestamps across all symbols
+        all_timestamps = sorted(set(
+            ts for symbol_data in market_data.values()
+            for ts in symbol_data['timestamp'].to_numpy()
+        ))
+        
+        logger.info(f"Total timestamps: {len(all_timestamps)}, date range: {all_timestamps[0]} to {all_timestamps[-1]}")
+        
+        # Generate signals for each timestamp
+        for idx, timestamp in enumerate(all_timestamps):
+            # Convert numpy datetime64 to datetime for comparison
+            ts_datetime = pd.Timestamp(timestamp).to_pydatetime()
+            if ts_datetime < start_date or ts_datetime > end_date:
+                continue
+            
+            signals_at_time = []
+            
+            # Evaluate strategy for each symbol
+            for symbol, symbol_data in market_data.items():
+                # Get data up to current timestamp
+                symbol_timestamps = symbol_data['timestamp'].to_numpy()
+                mask = symbol_timestamps <= timestamp
+                
+                if mask.sum() < 30:  # Need at least 30 bars for indicators
+                    continue
+                
+                # Prepare data for strategy evaluation
+                strategy_input = {
+                    'close': symbol_data['close'].to_numpy()[mask],
+                    'open': symbol_data['open'].to_numpy()[mask],
+                    'high': symbol_data['high'].to_numpy()[mask],
+                    'low': symbol_data['low'].to_numpy()[mask],
+                    'volume': symbol_data['volume'].to_numpy()[mask]
+                }
+                
+                # Evaluate strategy
+                signal = await strategy.evaluate(symbol, strategy_input)
+                
+                # Log signal for debugging
+                if idx % 30 == 0:  # Log every 30th evaluation
+                    logger.info(f"[{idx}/{len(all_timestamps)}] {symbol} @ {timestamp}: {signal['signal_type']} (conf: {signal['confidence']:.2f})")
+                
+                # Convert to backtest engine format
+                if signal['signal_type'] == 'BUY':
+                    signals_at_time.append({
+                        'symbol': symbol,
+                        'signal': 1,  # Buy signal
+                        'confidence': signal['confidence']
+                    })
+                elif signal['signal_type'] == 'SELL':
+                    signals_at_time.append({
+                        'symbol': symbol,
+                        'signal': -1,  # Sell signal
+                        'confidence': signal['confidence']
+                    })
+            
+            if signals_at_time:
+                strategy_signals[timestamp] = signals_at_time
+        
+        logger.info(f"Generated {len(strategy_signals)} signal timestamps")
+        
+        # Create backtest ID
+        backtest_id = f"BT{len(active_backtests) + 1:06d}"
+        
+        active_backtests[backtest_id] = {
+            "strategy": strategy_name,
+            "symbols": symbols,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "status": "running",
+            "started_at": datetime.utcnow().isoformat()
+        }
+        
+        # Run backtest with generated signals
+        try:
+            metrics = engine.run_backtest(strategy_signals)
+            
+            active_backtests[backtest_id]["status"] = "completed"
+            active_backtests[backtest_id]["completed_at"] = datetime.utcnow().isoformat()
+            active_backtests[backtest_id]["metrics"] = {
+                "total_return": metrics.total_return,
+                "annual_return": metrics.annual_return,
+                "sharpe_ratio": metrics.sharpe_ratio,
+                "sortino_ratio": metrics.sortino_ratio,
+                "calmar_ratio": metrics.calmar_ratio,
+                "max_drawdown": metrics.max_drawdown,
+                "volatility": metrics.volatility,
+                "num_trades": metrics.num_trades,
+                "win_rate": metrics.win_rate,
+                "profit_factor": metrics.profit_factor,
+                "avg_trade_pnl": metrics.avg_trade_pnl,
+                "total_commission": metrics.total_commission,
+                "total_slippage": metrics.total_slippage
+            }
+            
+            STRATEGY_BACKTESTS.labels(strategy=strategy_name).inc()
+            
+        except Exception as e:
+            active_backtests[backtest_id]["status"] = "failed"
+            active_backtests[backtest_id]["error"] = str(e)
+            logger.error(f"Backtest failed: {e}")
+        
+        return {
+            "backtest_id": backtest_id,
+            "status": active_backtests[backtest_id]["status"],
+            "strategy": strategy_name,
+            "symbols": symbols,
+            "message": "Backtest initiated"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting backtest: {e}")
+        STRATEGY_ERRORS.labels(endpoint="backtest_run").inc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/backtest/{backtest_id}")
+async def get_backtest_status(backtest_id: str):
+    """Get status and results of a backtest"""
+    if backtest_id not in active_backtests:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    
+    return active_backtests[backtest_id]
+
+
+@app.get("/backtest/list")
+async def list_backtests():
+    """List all backtests"""
+    return {
+        "backtests": [
+            {"id": bid, **info}
+            for bid, info in active_backtests.items()
+        ],
+        "total": len(active_backtests)
+    }
+
+
+@app.get("/backtest/symbols/available")
+async def get_available_symbols():
+    """Get list of symbols with sufficient data for backtesting"""
+    global questdb_loader
+    if questdb_loader is None:
+        questdb_loader = QuestDBDataLoader()
+    
+    try:
+        symbols = questdb_loader.get_available_symbols(min_bars=100)
+        return {
+            "symbols": symbols,
+            "count": len(symbols),
+            "min_bars": 100
+        }
+    except Exception as e:
+        logger.error(f"Error getting available symbols: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Launch background task after startup

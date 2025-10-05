@@ -37,6 +37,52 @@
 </section>
 
 <section class="panel">
+  <h2>📊 Data Inventory (All Systems)</h2>
+  <div class="metric-grid" style="grid-template-columns: repeat(4, 1fr); margin-top: 16px;">
+    <div class="metric-card">
+      <h3>Market Data</h3>
+      <div class="metric-value" id="data-market">—</div>
+      <div class="metric-sub">QuestDB Bars</div>
+    </div>
+    <div class="metric-card">
+      <h3>Social Signals</h3>
+      <div class="metric-value" id="data-social">—</div>
+      <div class="metric-sub">Sentiment Data</div>
+    </div>
+    <div class="metric-card">
+      <h3>Options Data</h3>
+      <div class="metric-value" id="data-options">—</div>
+      <div class="metric-sub">Contracts</div>
+    </div>
+    <div class="metric-card">
+      <h3>News Events</h3>
+      <div class="metric-value" id="data-news">—</div>
+      <div class="metric-sub">PostgreSQL</div>
+    </div>
+    <div class="metric-card">
+      <h3>Watchlist</h3>
+      <div class="metric-value" id="data-watchlist">—</div>
+      <div class="metric-sub">Active Symbols</div>
+    </div>
+    <div class="metric-card">
+      <h3>Vector DB</h3>
+      <div class="metric-value" id="data-weaviate">—</div>
+      <div class="metric-sub">Embeddings</div>
+    </div>
+    <div class="metric-card">
+      <h3>Total Records</h3>
+      <div class="metric-value" id="data-total">—</div>
+      <div class="metric-sub">All Systems</div>
+    </div>
+    <div class="metric-card">
+      <h3>Services</h3>
+      <div class="metric-value" id="data-services">—</div>
+      <div class="metric-sub">Healthy / Total</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
   <h2>⚡ System Metrics (Real-Time)</h2>
   <div class="metric-grid" style="grid-template-columns: repeat(4, 1fr); margin-top: 16px;">
     <div class="metric-card">
@@ -281,6 +327,40 @@ async function loadOpsSnapshot(){
   } catch(e) { /* silent */ }
 }
 loadOpsSnapshot(); setInterval(loadOpsSnapshot, 20000);
+// Load comprehensive data inventory
+async function loadDataInventory(){
+  try {
+    const [comprehensive, services] = await Promise.all([
+      fetchJSON('/api/dashboard/data/comprehensive'),
+      fetchJSON('/api/dashboard/services/health')
+    ]);
+    function fmt(n){ return n>=1000000 ? (n/1000000).toFixed(1)+'M' : n>=1000 ? (n/1000).toFixed(1)+'K' : n; }
+    if(comprehensive && comprehensive.inventory){
+      const inv = comprehensive.inventory;
+      if(inv.questdb){
+        document.getElementById('data-market').textContent = fmt(inv.questdb.market_data?.count || 0);
+        document.getElementById('data-social').textContent = fmt(inv.questdb.social_signals?.count || 0);
+        document.getElementById('data-options').textContent = fmt(inv.questdb.options_data?.count || 0);
+      }
+      if(inv.postgres){
+        const newsCount = inv.postgres.news_events?.count || 0;
+        document.getElementById('data-news').textContent = fmt(newsCount);
+      }
+      if(inv.redis){
+        document.getElementById('data-watchlist').textContent = inv.redis.watchlist?.count || 0;
+      }
+      if(inv.weaviate){
+        const total = Object.values(inv.weaviate).reduce((sum,v)=> sum + (v.count||0), 0);
+        document.getElementById('data-weaviate').textContent = total;
+      }
+      document.getElementById('data-total').textContent = fmt(comprehensive.total_records || 0);
+    }
+    if(services){
+      document.getElementById('data-services').textContent = services.healthy + '/' + services.total;
+    }
+  } catch(e){ console.error('Data inventory load error:', e); }
+}
+loadDataInventory(); setInterval(loadDataInventory, 30000);
 // On-demand backfill triggers
 (function(){
   async function call(path, body){

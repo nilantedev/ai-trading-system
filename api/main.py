@@ -162,6 +162,14 @@ try:
 except Exception as e:  # noqa: BLE001
     logger.error("Failed to register dashboard routers early", error=str(e))
 
+# Register dashboard data API
+try:
+    from api.routers.dashboard_data import router as dashboard_data_router  # type: ignore
+    app.include_router(dashboard_data_router)
+    logger.info("Dashboard data API registered")
+except Exception as e:  # noqa: BLE001
+    logger.error("Failed to register dashboard data API", error=str(e))
+
 # Register real-time intelligence routes for PhD-level dashboards
 try:
     from api.routers.realtime_intelligence import register_realtime_intelligence_routes  # type: ignore
@@ -1111,6 +1119,12 @@ async def health_check():
         "unhealthy_breakers": unhealthy_breakers,
         "security_store": security_store_health
     }
+
+# API health endpoint alias for consistency
+@app.get("/api/health")
+async def api_health_check():
+    """Health check endpoint under /api prefix for consistency."""
+    return await health_check()
 
 # Deep health probe with external dependencies (costlier)
 @app.get("/health/full")
